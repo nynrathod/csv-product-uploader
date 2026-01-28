@@ -1,0 +1,78 @@
+@import 'tailwindcss';
+
+@layer base {
+  * {
+    @apply border-zinc-200 outline-zinc-900/5;
+  }
+
+  body {
+    @apply bg-white font-sans text-zinc-950 antialiased;
+  }
+}
+
+@theme {
+  --font-sans: 'Inter', sans-serif;
+  --color-border: #e4e4e7;
+  --color-input: #e4e4e7;
+  --color-ring: #18181b;
+  --color-background: #ffffff;
+  --color-foreground: #09090b;
+
+  --color-primary: #18181b;
+  --color-primary-foreground: #fafafa;
+
+  --color-secondary: #f4f4f5;
+  --color-secondary-foreground: #18181b;
+
+  --color-destructive: #ef4444;
+  --color-destructive-foreground: #fafafa;
+
+  --color-muted: #f4f4f5;
+  --color-muted-foreground: #71717a;
+
+  --color-accent: #f4f4f5;
+  --color-accent-foreground: #18181b;
+
+  --color-popover: #ffffff;
+  --color-popover-foreground: #09090b;
+
+  --color-card: #ffffff;
+  --color-card-foreground: #09090b;
+
+  --radius-lg: 0.5rem;
+  --radius-md: calc(0.5rem - 2px);
+  --radius-sm: calc(0.5rem - 4px);
+}
+
+/* Animations */
+@keyframes enter {
+  from {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes exit {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+
+  to {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+}
+
+.animate-in {
+  animation: enter 0.2s ease-out;
+}
+
+.animate-out {
+  animation: exit 0.1s ease-in;
+}
