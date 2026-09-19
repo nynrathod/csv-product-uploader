@@ -26,6 +26,12 @@ type JobStore interface {
 	// FailStale marks every non-terminal job as failed; it runs at service
 	// startup so jobs orphaned by a restart or crash never hang forever.
 	FailStale(ctx context.Context, reason string) (int64, error)
+	// ApplyProgress folds a progress delta into a job's counters and
+	// completes the job once the catalog has confirmed every published
+	// event as processed or dead-lettered. Progress for jobs that are not
+	// awaiting confirmation is ignored, so replayed or duplicate reports
+	// cannot inflate the ledger.
+	ApplyProgress(ctx context.Context, id string, processed, retried, dead int64) error
 }
 
 // EventPublisher emits product events onto the durable event stream that

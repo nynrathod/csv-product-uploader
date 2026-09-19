@@ -120,8 +120,18 @@ func (s *ImportService) process(jobID, filePath string, opts StreamOptions) {
 		s.fail(ctx, jobID, err)
 		return
 	}
-	if err := s.store.UpdateStatus(ctx, jobID, StatusCompleted, nil); err != nil {
-		log.Printf("import %s: marking completed failed: %v", jobID, err)
+
+	// A job with nothing to materialize is complete the moment publishing
+	// ends. Otherwise the import awaits the catalog worker's confirmation
+	// through progress events; the progress tracker advances the job to
+	// completed once every published event is confirmed as processed or
+	// dead-lettered.
+	terminal := StatusCompleted
+	if published > 0 {
+		terminal = StatusProcessing
+	}
+	if err := s.store.UpdateStatus(ctx, jobID, terminal, nil); err != nil {
+		log.Printf("import %s: marking %s failed: %v", jobID, terminal, err)
 	}
 }
 

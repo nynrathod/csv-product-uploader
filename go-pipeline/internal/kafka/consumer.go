@@ -57,6 +57,11 @@ func NewConsumer(cfg ConsumerConfig, topics ...string) (*Consumer, error) {
 
 		kgo.FetchMaxBytes(cfg.FetchMaxBytes),
 		kgo.FetchMaxWait(cfg.MaxWait),
+
+		// When no committed offset exists for a partition, consumption
+		// begins at the earliest record: a reset group rebuilds the full
+		// event history rather than silently skipping it.
+		kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("creating consumer client: %w", err)

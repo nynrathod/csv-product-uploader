@@ -62,6 +62,7 @@ func (h *HTTPHandler) Register(app *fiber.App) {
 	app.Get("/api/v1/imports", h.listImports)
 	app.Get("/api/v1/imports/:id", h.getImport)
 	app.Get("/api/v1/imports/:id/events", h.streamEvents)
+	app.Get("/api/v1/imports/:id/report", h.getReport)
 }
 
 // jobResponse is the external job representation. Field names and status
@@ -81,6 +82,42 @@ type jobResponse struct {
 	LastError     *string   `json:"lastError,omitempty"`
 	CreatedAt     time.Time `json:"createdAt"`
 	UpdatedAt     time.Time `json:"updatedAt"`
+}
+
+// reportResponse is the external reconciliation report for one import.
+type reportResponse struct {
+	JobID          string         `json:"jobId"`
+	FileName       string         `json:"fileName"`
+	Status         string         `json:"status"`
+	Rows           rowLedger      `json:"rows"`
+	Events         eventLedger    `json:"events"`
+	Reconciliation reconciliation `json:"reconciliation"`
+	GeneratedAt    time.Time      `json:"generatedAt"`
+}
+
+// rowLedger is the parsing outcome of the uploaded file.
+type rowLedger struct {
+	Total   int64 `json:"total"`
+	Valid   int64 `json:"valid"`
+	Invalid int64 `json:"invalid"`
+}
+
+// eventLedger is the event-stream outcome of the import.
+type eventLedger struct {
+	Published int64 `json:"published"`
+	Processed int64 `json:"processed"`
+	Retried   int64 `json:"retried"`
+	Dead      int64 `json:"dead"`
+}
+
+// reconciliation compares what was published with what the catalog
+// confirmed. Confirmed counts processed and dead-lettered events; anything
+// published but unconfirmed is still in flight.
+type reconciliation struct {
+	Published   int64  `json:"published"`
+	Confirmed   int64  `json:"confirmed"`
+	Unconfirmed int64  `json:"unconfirmed"`
+	State       string `json:"state"`
 }
 
 // externalStatus maps internal lifecycle states onto the four states the
@@ -375,4 +412,52 @@ func importNotFound(c fiber.Ctx, err error) error {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "import job not found"})
 	}
 	return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "loading the import job failed"})
+}
+
+// getReport returns the reconciliation report for one import.
+func (h *HTTPHandler) getReport(c fiber.Ctx) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	job, err := h.store.Get(ctx, c.Params("id"))
+	if err != nil {
+		return importNotFound(c, err)
+	}
+	return c.JSON(buildReport(job))
+}
+
+// buildReport renders the reconciliation report for a job.
+func buildReport(j ImportJob) reportResponse {
+	confirmed := j.ProcessedRows + j.DeadRows
+	unconfirmed := j.PublishedRows - confirmed
+
+	state := "in-flight"
+	switch {
+	case j.Status == StatusFailed:
+		state = "failed"
+	case unconfirmed < 0:
+		state = "discrepancy"
+	case j.Status == StatusCompleted:
+		if unconfirmed == 0 {
+			state = "complete"
+		} else {
+			state = "discrepancy"
+		}
+	}
+
+	return reportResponse{
+		JobID:    j.ID,
+		FileName: j.FileName,
+		Status:   externalStatus(j.Status),
+		Rows:     rowLedger{Total: j.TotalRows, Valid: j.ValidRows, Invalid: j.InvalidRows},
+		Events: eventLedger{
+			Published: j.PublishedRows, Processed: j.ProcessedRows,
+			Retried: j.RetriedRows, Dead: j.DeadRows,
+		},
+		Reconciliation: reconciliation{
+			Published: j.PublishedRows, Confirmed: confirmed,
+			Unconfirmed: unconfirmed, State: state,
+		},
+		GeneratedAt: time.Now().UTC(),
+	}
 }

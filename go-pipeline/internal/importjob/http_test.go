@@ -74,8 +74,9 @@ func TestCreateImportFlow(t *testing.T) {
 		t.Fatalf("created = %+v", created)
 	}
 
-	final := waitTerminal(t, store, created.ID, 5*time.Second)
-	_ = final
+	waitForJob(t, store, created.ID, func(j ImportJob) bool {
+		return j.Status == StatusProcessing && j.PublishedRows == 2
+	}, 5*time.Second)
 
 	getReq := httptest.NewRequest(http.MethodGet, "/api/v1/imports/"+created.ID, nil)
 	getResp, err := app.Test(getReq)
@@ -86,8 +87,9 @@ func TestCreateImportFlow(t *testing.T) {
 	if err := json.NewDecoder(getResp.Body).Decode(&got); err != nil {
 		t.Fatalf("decode job: %v", err)
 	}
-	if got.Status != "completed" {
-		t.Fatalf("status = %q, want completed", got.Status)
+	// The importer's work is done; the catalog's confirmation is pending.
+	if got.Status != "processing" {
+		t.Fatalf("status = %q, want processing", got.Status)
 	}
 	if got.TotalRows != 3 || got.ValidRows != 2 || got.InvalidRows != 1 || got.PublishedRows != 2 {
 		t.Fatalf("job = %+v, want 3 total / 2 valid / 1 invalid / 2 published", got)
@@ -161,5 +163,49 @@ func TestSSEStreamCompletes(t *testing.T) {
 	}
 	if !strings.Contains(out, `"totalRows":2`) {
 		t.Fatalf("stream missing counts:\n%s", out)
+	}
+}
+
+func TestReportEndpoint(t *testing.T) {
+	t.Parallel()
+
+	store := newMemStore()
+	store.put(&ImportJob{
+		ID: "r-1", FileName: "x.csv", Status: StatusCompleted,
+		TotalRows: 10, ValidRows: 8, InvalidRows: 2,
+		PublishedRows: 8, ProcessedRows: 8,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	})
+
+	app := newTestApp(store, 1)
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/v1/imports/r-1/report", nil))
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+
+	var rep struct {
+		Status string `json:"status"`
+		Rows   struct {
+			Total   int64 `json:"total"`
+			Valid   int64 `json:"valid"`
+			Invalid int64 `json:"invalid"`
+		} `json:"rows"`
+		Reconciliation struct {
+			Published   int64  `json:"published"`
+			Confirmed   int64  `json:"confirmed"`
+			Unconfirmed int64  `json:"unconfirmed"`
+			State       string `json:"state"`
+		} `json:"reconciliation"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&rep); err != nil {
+		t.Fatalf("decode report: %v", err)
+	}
+	if rep.Status != "completed" || rep.Rows.Total != 10 || rep.Rows.Invalid != 2 {
+		t.Fatalf("report = %+v", rep)
+	}
+	if rep.Reconciliation.State != "complete" || rep.Reconciliation.Unconfirmed != 0 ||
+		rep.Reconciliation.Confirmed != 8 || rep.Reconciliation.Published != 8 {
+		t.Fatalf("reconciliation = %+v, want complete at 8/8", rep.Reconciliation)
 	}
 }

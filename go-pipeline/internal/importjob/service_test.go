@@ -84,12 +84,18 @@ func (m *memStore) UpdateStatus(_ context.Context, id string, to Status, lastErr
 	return nil
 }
 
+// prePublication states hold work that dies with the process; jobs
+// awaiting catalog confirmation survive restarts.
+var prePublication = map[Status]bool{
+	StatusUploading: true, StatusParsing: true, StatusPublishing: true,
+}
+
 func (m *memStore) FailStale(_ context.Context, reason string) (int64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var n int64
 	for _, j := range m.jobs {
-		if !j.Status.Terminal() {
+		if prePublication[j.Status] {
 			j.Status = StatusFailed
 			r := reason
 			j.LastError = &r
@@ -113,7 +119,41 @@ func waitTerminal(t *testing.T, store *memStore, id string, timeout time.Duratio
 	return ImportJob{}
 }
 
-func TestImportServiceCompletes(t *testing.T) {
+func waitForJob(t *testing.T, store *memStore, id string, cond func(ImportJob) bool, timeout time.Duration) ImportJob {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		j, err := store.Get(context.Background(), id)
+		if err == nil && cond(j) {
+			return j
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("job %s did not satisfy the condition within %v", id, timeout)
+	return ImportJob{}
+}
+
+func (m *memStore) ApplyProgress(_ context.Context, id string, processed, retried, dead int64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	j, ok := m.jobs[id]
+	if !ok || j.Status != StatusProcessing {
+		// Unknown jobs and jobs no longer awaiting confirmation ignore
+		// progress: replayed or duplicate reports cannot inflate the
+		// ledger.
+		return nil
+	}
+	j.ProcessedRows += processed
+	j.RetriedRows += retried
+	j.DeadRows += dead
+	if j.ProcessedRows+j.DeadRows >= j.PublishedRows {
+		j.Status = StatusCompleted
+	}
+	j.UpdatedAt = time.Now().UTC()
+	return nil
+}
+
+func TestImportServiceEndsAwaitingCatalogConfirmation(t *testing.T) {
 	t.Parallel()
 
 	csvData := "name;price;expiration\n" +
@@ -129,7 +169,7 @@ func TestImportServiceCompletes(t *testing.T) {
 	}
 
 	store := newMemStore()
-	svc := NewImportService(store, NoopPublisher{}, 1) // flush every row
+	svc := NewImportService(store, NoopPublisher{}, 1)
 
 	job, err := svc.StartImport(context.Background(), path, "products.csv", StreamOptions{
 		DefaultMerchantID: "default",
@@ -138,21 +178,55 @@ func TestImportServiceCompletes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartImport: %v", err)
 	}
-	if job.ID == "" || job.Status != StatusParsing {
-		t.Fatalf("job = %+v, want an id and parsing status", job)
+
+	// The importer's own work ends with the durable publication of every
+	// valid row; completion now belongs to the catalog's confirmation.
+	final := waitForJob(t, store, job.ID, func(j ImportJob) bool {
+		return j.Status == StatusProcessing && j.PublishedRows == 3
+	}, 5*time.Second)
+	if final.TotalRows != 4 || final.ValidRows != 3 || final.InvalidRows != 1 {
+		t.Fatalf("final = %+v, want 4 total / 3 valid / 1 invalid", final)
+	}
+
+	// Confirming every event through progress completes the job.
+	if err := store.ApplyProgress(context.Background(), job.ID, 3, 0, 0); err != nil {
+		t.Fatalf("ApplyProgress: %v", err)
+	}
+	done, _ := store.Get(context.Background(), job.ID)
+	if done.Status != StatusCompleted || done.ProcessedRows != 3 {
+		t.Fatalf("job = %+v, want completed with 3 processed", done)
+	}
+
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("temp file still present: %v", err)
+	}
+}
+
+func TestImportServiceCompletesWhenNothingPublished(t *testing.T) {
+	t.Parallel()
+
+	csvData := "name;price\nBroken Item;not-a-price\n"
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "products.csv")
+	if err := os.WriteFile(path, []byte(csvData), 0o600); err != nil {
+		t.Fatalf("writing fixture: %v", err)
+	}
+
+	store := newMemStore()
+	svc := NewImportService(store, NoopPublisher{}, 1)
+
+	job, err := svc.StartImport(context.Background(), path, "products.csv", StreamOptions{
+		DefaultMerchantID: "default",
+		DefaultCurrency:   "USD",
+	})
+	if err != nil {
+		t.Fatalf("StartImport: %v", err)
 	}
 
 	final := waitTerminal(t, store, job.ID, 5*time.Second)
-	if final.Status != StatusCompleted {
-		t.Fatalf("status = %s, lastError = %v", final.Status, final.LastError)
-	}
-	if final.TotalRows != 4 || final.ValidRows != 3 || final.InvalidRows != 1 || final.PublishedRows != 3 {
-		t.Fatalf("final = %+v, want 4 total / 3 valid / 1 invalid / 3 published", final)
-	}
-
-	// The service owns the file and removes it when processing ends.
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatalf("temp file still present: %v", err)
+	if final.Status != StatusCompleted || final.PublishedRows != 0 || final.InvalidRows != 1 {
+		t.Fatalf("final = %+v, want completed with nothing published", final)
 	}
 }
 
@@ -177,7 +251,8 @@ func TestFailStale(t *testing.T) {
 	t.Parallel()
 
 	store := newMemStore()
-	store.put(&ImportJob{ID: "running", Status: StatusParsing})
+	store.put(&ImportJob{ID: "parsing", Status: StatusParsing})
+	store.put(&ImportJob{ID: "awaiting", Status: StatusProcessing, PublishedRows: 5})
 	store.put(&ImportJob{ID: "done", Status: StatusCompleted})
 
 	n, err := store.FailStale(context.Background(), "importer restarted")
@@ -187,9 +262,13 @@ func TestFailStale(t *testing.T) {
 	if n != 1 {
 		t.Fatalf("marked %d jobs, want 1", n)
 	}
-	running, _ := store.Get(context.Background(), "running")
-	if running.Status != StatusFailed || running.LastError == nil {
-		t.Fatalf("running = %+v, want failed with cause", running)
+	parsing, _ := store.Get(context.Background(), "parsing")
+	if parsing.Status != StatusFailed || parsing.LastError == nil {
+		t.Fatalf("parsing = %+v, want failed with cause", parsing)
+	}
+	awaiting, _ := store.Get(context.Background(), "awaiting")
+	if awaiting.Status != StatusProcessing {
+		t.Fatalf("awaiting = %+v, must survive restarts", awaiting)
 	}
 }
 
@@ -199,6 +278,7 @@ func TestStatusTransitionRules(t *testing.T) {
 	valid := []struct{ from, to Status }{
 		{StatusParsing, StatusCompleted},
 		{StatusParsing, StatusPublishing},
+		{StatusParsing, StatusProcessing},
 		{StatusPublishing, StatusProcessing},
 		{StatusProcessing, StatusCompleted},
 		{StatusParsing, StatusFailed},
@@ -213,7 +293,7 @@ func TestStatusTransitionRules(t *testing.T) {
 	invalid := []struct{ from, to Status }{
 		{StatusCompleted, StatusParsing},
 		{StatusFailed, StatusParsing},
-		{StatusParsing, StatusProcessing},
+		{StatusCompleted, StatusProcessing},
 	}
 	for _, tc := range invalid {
 		j := ImportJob{Status: tc.from}
@@ -296,8 +376,10 @@ func TestImportServicePublishesValidRows(t *testing.T) {
 		t.Fatalf("StartImport: %v", err)
 	}
 
-	final := waitTerminal(t, store, job.ID, 5*time.Second)
-	if final.Status != StatusCompleted {
+	final := waitForJob(t, store, job.ID, func(j ImportJob) bool {
+		return j.Status == StatusProcessing && j.PublishedRows == 2
+	}, 5*time.Second)
+	if final.Status != StatusProcessing {
 		t.Fatalf("status = %s, lastError = %v", final.Status, final.LastError)
 	}
 
@@ -322,5 +404,43 @@ func TestImportServicePublishesValidRows(t *testing.T) {
 	}
 	if first.Product.PriceCents != 11555 || second.Product.PriceCents != 7260 {
 		t.Fatalf("event prices = %d, %d", first.Product.PriceCents, second.Product.PriceCents)
+	}
+}
+
+func TestApplyProgressSemantics(t *testing.T) {
+	t.Parallel()
+
+	store := newMemStore()
+	store.put(&ImportJob{ID: "j-ap", Status: StatusProcessing, PublishedRows: 10})
+
+	if err := store.ApplyProgress(context.Background(), "j-ap", 4, 1, 1); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	j, _ := store.Get(context.Background(), "j-ap")
+	if j.Status != StatusProcessing || j.ProcessedRows != 4 || j.RetriedRows != 1 || j.DeadRows != 1 {
+		t.Fatalf("job = %+v", j)
+	}
+
+	// Confirming the remainder completes the job atomically with the fold.
+	if err := store.ApplyProgress(context.Background(), "j-ap", 5, 0, 0); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	j, _ = store.Get(context.Background(), "j-ap")
+	if j.Status != StatusCompleted {
+		t.Fatalf("status = %s, want completed", j.Status)
+	}
+
+	// Late or replayed progress cannot inflate a confirmed ledger.
+	if err := store.ApplyProgress(context.Background(), "j-ap", 5, 0, 0); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	j, _ = store.Get(context.Background(), "j-ap")
+	if j.ProcessedRows != 9 || j.Status != StatusCompleted {
+		t.Fatalf("job = %+v, want counters unchanged", j)
+	}
+
+	// Unknown jobs settle the event without error.
+	if err := store.ApplyProgress(context.Background(), "missing", 1, 0, 0); err != nil {
+		t.Fatalf("apply for unknown job: %v", err)
 	}
 }

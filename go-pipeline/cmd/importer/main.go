@@ -69,6 +69,27 @@ func main() {
 
 	service := importjob.NewImportService(store, publisher, cfg.ProgressFlushRows)
 
+	// The progress tracker is the importer's own consumer: it folds the
+	// catalog worker's progress events into the import jobs this service
+	// owns, completing them once the catalog confirms every event.
+	progressConsumer, err := kafka.NewConsumer(kafka.ConsumerConfig{
+		Brokers:  cfg.KafkaBrokers,
+		Group:    kafka.GroupImportTracker,
+		ClientID: "import-tracker",
+	}, kafka.TopicImportProgress)
+	if err != nil {
+		log.Fatalf("creating the progress consumer: %v", err)
+	}
+
+	tracker := importjob.NewProgressTracker(store, progressConsumer)
+	trackerDone := make(chan struct{})
+	go func() {
+		defer close(trackerDone)
+		if err := tracker.Run(ctx); err != nil {
+			log.Printf("progress tracker exited: %v", err)
+		}
+	}()
+
 	app := fiber.New(fiber.Config{
 		// Streaming request bodies keep multipart uploads out of RAM; the
 		// file is spooled to disk part by part.
@@ -100,6 +121,11 @@ func main() {
 		GracefulContext: ctx,
 		ShutdownTimeout: time.Duration(cfg.ShutdownTimeoutSec) * time.Second,
 	})
+
+	// The HTTP server is down; the tracker drains and stops with the
+	// cancelled context before its consumer is released.
+	<-trackerDone
+	progressConsumer.Close()
 
 	if err != nil && !errors.Is(err, context.Canceled) {
 		log.Fatalf("importer exited: %v", err)

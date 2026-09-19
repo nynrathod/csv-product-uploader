@@ -26,7 +26,7 @@ func (s Status) Terminal() bool { return s == StatusCompleted || s == StatusFail
 // allowedTransitions defines the lifecycle graph.
 var allowedTransitions = map[Status][]Status{
 	StatusUploading:  {StatusParsing},
-	StatusParsing:    {StatusPublishing, StatusCompleted, StatusFailed},
+	StatusParsing:    {StatusPublishing, StatusProcessing, StatusCompleted, StatusFailed},
 	StatusPublishing: {StatusProcessing, StatusFailed},
 	StatusProcessing: {StatusCompleted, StatusFailed},
 	StatusCompleted:  {},

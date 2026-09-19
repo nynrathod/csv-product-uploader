@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -29,6 +30,13 @@ const jobColumns = `id::text, file_name, status, total_rows, valid_rows, invalid
 type rowScanner interface {
 	Scan(dest ...any) error
 }
+
+// uuidPattern matches the canonical textual UUID form; job ids are
+// database-generated UUIDs.
+var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+// isUUID reports whether s is a well-formed UUID.
+func isUUID(s string) bool { return uuidPattern.MatchString(s) }
 
 func scanJob(r rowScanner) (importjob.ImportJob, error) {
 	var (
@@ -56,8 +64,12 @@ func (s *JobStore) Create(ctx context.Context, job *importjob.ImportJob) error {
 	).Scan(&job.ID, &job.CreatedAt, &job.UpdatedAt)
 }
 
-// Get loads one import job by id.
+// Get loads one import job by id. Malformed ids are reported as not found
+// rather than surfacing database cast errors to clients.
 func (s *JobStore) Get(ctx context.Context, id string) (importjob.ImportJob, error) {
+	if !isUUID(id) {
+		return importjob.ImportJob{}, importjob.ErrNotFound
+	}
 	job, err := scanJob(s.pool.QueryRow(ctx,
 		`SELECT `+jobColumns+` FROM import_jobs WHERE id = $1::uuid`, id))
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -114,12 +126,16 @@ func (s *JobStore) UpdateStatus(ctx context.Context, id string, to importjob.Sta
 	return rowsAffected(tag, id)
 }
 
-// FailStale marks every non-terminal job as failed with the given reason.
+// FailStale marks jobs whose work died with the process as failed. Only
+// pre-publication states are affected: their CSV parsing and publishing
+// were in memory and cannot resume. Jobs awaiting catalog confirmation
+// survive a restart: their events are durably on the stream and the
+// progress tracker will complete them as the worker reports.
 func (s *JobStore) FailStale(ctx context.Context, reason string) (int64, error) {
 	tag, err := s.pool.Exec(ctx, `
         UPDATE import_jobs
         SET status = 'failed', last_error = $1, updated_at = now()
-        WHERE status NOT IN ('completed', 'failed')`, reason)
+        WHERE status IN ('uploading', 'parsing', 'publishing')`, reason)
 	if err != nil {
 		return 0, err
 	}
@@ -131,4 +147,32 @@ func rowsAffected(tag pgconn.CommandTag, id string) error {
 		return fmt.Errorf("%w: %s", importjob.ErrNotFound, id)
 	}
 	return nil
+}
+
+// ApplyProgress folds a progress delta into a job's counters. The update
+// is restricted to jobs awaiting catalog confirmation, so replayed or
+// duplicate reports cannot inflate the ledger, and the completion
+// transition is evaluated atomically with the counter fold.
+func (s *JobStore) ApplyProgress(ctx context.Context, id string, processed, retried, dead int64) error {
+	var confirmed bool
+	err := s.pool.QueryRow(ctx, `
+        UPDATE import_jobs
+        SET processed_rows = processed_rows + $2,
+            retried_rows = retried_rows + $3,
+            dead_rows = dead_rows + $4,
+            updated_at = now(),
+            status = CASE
+                WHEN (processed_rows + $2) + (dead_rows + $4) >= published_rows
+                THEN 'completed'
+                ELSE status
+            END
+        WHERE id = $1::uuid AND status = 'processing'
+        RETURNING true`,
+		id, processed, retried, dead).Scan(&confirmed)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// The job is unknown or no longer awaiting confirmation; either
+		// way the event is settled and its offset may commit.
+		return nil
+	}
+	return err
 }
