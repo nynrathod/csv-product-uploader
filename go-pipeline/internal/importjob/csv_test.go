@@ -25,6 +25,10 @@ func TestParsePriceCents(t *testing.T) {
 		{"0", 0, true},
 		{"1", 100, true},
 		{"19.99", 1999, true},
+		{"$115.55", 11555, true},
+		{"€5.00", 500, true},
+		{"£ 9.99", 999, true},
+		{"¥1000", 100000, true},
 		{"0.01", 1, true},
 		{"0.1", 10, true},
 		{"123456.78", 12345678, true},
@@ -59,133 +63,120 @@ func TestParsePriceCents(t *testing.T) {
 	}
 }
 
+func TestDeriveProductID(t *testing.T) {
+	t.Parallel()
+
+	if got := deriveProductID("Calypso - Lemonade #(4026987913289674)"); got != "4026987913289674" {
+		t.Errorf("sku derivation = %q", got)
+	}
+
+	// Hash derivation is deterministic and collision-distinct.
+	a := deriveProductID("Widget")
+	if a != deriveProductID("Widget") {
+		t.Fatal("hash derivation is not deterministic")
+	}
+	if a == deriveProductID("Gadget") {
+		t.Fatal("distinct names derived the same id")
+	}
+	if !strings.HasPrefix(a, "p-") {
+		t.Errorf("hash id = %q, want p- prefix", a)
+	}
+}
+
 func TestNormalize(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
-		desc        string
-		merchantID  string
-		productID   string
-		productName string
-		price       string
-		currency    string
-		expiration  string
-		want        events.ProductData
-		reason      string
+		desc       string
+		merchantID string
+		productID  string
+		name       string
+		price      string
+		currency   string
+		expiration string
+		want       events.ProductData
+		reason     string
 	}{
 		{
-			desc:        "valid with expiration",
-			merchantID:  " M-1 ",
-			productID:   "P-1",
-			productName: "  Ergonomic Chair  ",
-			price:       "129.99",
-			currency:    "usd",
-			expiration:  " 2027-03-31 ",
+			desc:       "valid with expiration",
+			merchantID: "M-1", productID: "P-1", name: "Ergonomic Chair",
+			price: "129.99", currency: "usd", expiration: "2027-03-31",
 			want: events.ProductData{
 				MerchantID: "M-1", ProductID: "P-1", Name: "Ergonomic Chair",
 				PriceCents: 12999, Currency: "USD", ExpirationDate: "2027-03-31",
 			},
 		},
 		{
-			desc:        "valid without expiration",
-			merchantID:  "M-1",
-			productID:   "P-1",
-			productName: "Desk Lamp",
-			price:       "45.00",
-			currency:    "EUR",
+			desc:       "us date format normalized",
+			merchantID: "M-1", productID: "", name: "Cheese - Grana Padano #(3566971102136738)",
+			price: "$163.88", currency: "", expiration: "1/14/2023",
 			want: events.ProductData{
-				MerchantID: "M-1", ProductID: "P-1", Name: "Desk Lamp",
-				PriceCents: 4500, Currency: "EUR",
+				MerchantID: "M-1", ProductID: "3566971102136738", Name: "Cheese - Grana Padano #(3566971102136738)",
+				PriceCents: 16388, Currency: "USD", ExpirationDate: "2023-01-14",
 			},
 		},
 		{
-			desc:        "missing merchant",
-			merchantID:  " ",
-			productID:   "P-1",
-			productName: "X",
-			price:       "1.00",
-			currency:    "USD",
-			reason:      "merchant_id is required",
+			desc:       "hash id when name carries no sku",
+			merchantID: "M-1", productID: "", name: "Widget",
+			price: "10.00", currency: "USD",
+			want: events.ProductData{
+				MerchantID: "M-1", ProductID: deriveProductID("Widget"), Name: "Widget",
+				PriceCents: 1000, Currency: "USD",
+			},
 		},
 		{
-			desc:        "merchant too long",
-			merchantID:  strings.Repeat("m", 65),
-			productID:   "P-1",
-			productName: "X",
-			price:       "1.00",
-			currency:    "USD",
-			reason:      "merchant_id exceeds 64 characters",
+			desc:       "missing merchant",
+			merchantID: " ", productID: "P-1", name: "X",
+			price: "1.00", currency: "USD",
+			reason: "merchant_id is required",
 		},
 		{
-			desc:        "missing product",
-			merchantID:  "M-1",
-			productID:   "",
-			productName: "X",
-			price:       "1.00",
-			currency:    "USD",
-			reason:      "product_id is required",
+			desc:       "merchant too long",
+			merchantID: strings.Repeat("m", 65), productID: "P-1", name: "X",
+			price: "1.00", currency: "USD",
+			reason: "merchant_id exceeds 64 characters",
 		},
 		{
-			desc:        "missing name",
-			merchantID:  "M-1",
-			productID:   "P-1",
-			productName: "",
-			price:       "1.00",
-			currency:    "USD",
-			reason:      "name is required",
+			desc:       "missing name",
+			merchantID: "M-1", productID: "P-1", name: "",
+			price: "1.00", currency: "USD",
+			reason: "name is required",
 		},
 		{
-			desc:        "name too long",
-			merchantID:  "M-1",
-			productID:   "P-1",
-			productName: strings.Repeat("x", 257),
-			price:       "1.00",
-			currency:    "USD",
-			reason:      "name exceeds 256 characters",
+			desc:       "name too long",
+			merchantID: "M-1", productID: "P-1", name: strings.Repeat("x", 257),
+			price: "1.00", currency: "USD",
+			reason: "name exceeds 256 characters",
 		},
 		{
-			desc:        "invalid price",
-			merchantID:  "M-1",
-			productID:   "P-1",
-			productName: "X",
-			price:       "abc",
-			currency:    "USD",
-			reason:      "price must be a decimal number",
+			desc:       "invalid price",
+			merchantID: "M-1", productID: "P-1", name: "X",
+			price: "abc", currency: "USD",
+			reason: "price must be a decimal number",
 		},
 		{
-			desc:        "unsupported currency",
-			merchantID:  "M-1",
-			productID:   "P-1",
-			productName: "X",
-			price:       "1.00",
-			currency:    "XYZ",
-			reason:      `currency "XYZ" is not supported`,
+			desc:       "unsupported currency",
+			merchantID: "M-1", productID: "P-1", name: "X",
+			price: "1.00", currency: "XYZ",
+			reason: `currency "XYZ" is not supported`,
 		},
 		{
-			desc:        "malformed expiration",
-			merchantID:  "M-1",
-			productID:   "P-1",
-			productName: "X",
-			price:       "1.00",
-			currency:    "USD",
-			expiration:  "31-12-2027",
-			reason:      "expiration_date must use the YYYY-MM-DD format",
+			desc:       "malformed expiration",
+			merchantID: "M-1", productID: "P-1", name: "X",
+			price: "1.00", currency: "USD", expiration: "31-12-2027",
+			reason: "expiration_date must use YYYY-MM-DD or M/D/YYYY",
 		},
 		{
-			desc:        "impossible date",
-			merchantID:  "M-1",
-			productID:   "P-1",
-			productName: "X",
-			price:       "1.00",
-			currency:    "USD",
-			expiration:  "2027-02-31",
-			reason:      "expiration_date must use the YYYY-MM-DD format",
+			desc:       "impossible date",
+			merchantID: "M-1", productID: "P-1", name: "X",
+			price: "1.00", currency: "USD", expiration: "2027-02-31",
+			reason: "expiration_date must use YYYY-MM-DD or M/D/YYYY",
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.desc, func(t *testing.T) {
-			got, reason := normalize(tc.merchantID, tc.productID, tc.productName, tc.price, tc.currency, tc.expiration)
+			got, reason := normalize(tc.merchantID, tc.productID, tc.name, tc.price, tc.currency, tc.expiration)
 			if reason != tc.reason {
 				t.Fatalf("reason = %q, want %q", reason, tc.reason)
 			}
@@ -206,11 +197,35 @@ func TestMapColumns(t *testing.T) {
 	if cols["name"] != 0 || cols["price"] != 1 || cols["merchant_id"] != 2 {
 		t.Fatalf("mapping = %+v", cols)
 	}
-	if _, err := mapColumns([]string{"name", "price"}); err == nil {
-		t.Fatal("expected error for missing columns")
+	if _, err := mapColumns([]string{"merchant_id"}); err == nil {
+		t.Fatal("expected error for missing required columns")
 	}
-	if _, err := mapColumns([]string{"name", "name", "price", "merchant_id", "product_id", "currency", "expiration_date"}); err == nil {
+	if _, err := mapColumns([]string{"name", "name", "price"}); err == nil {
 		t.Fatal("expected error for duplicate column")
+	}
+}
+
+func TestDetectDelimiter(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		in   string
+		want rune
+		ok   bool
+	}{
+		{"name;price;expiration", ';', true},
+		{"name,price,expiration", ',', true},
+		{"name\tprice", '\t', true},
+		{"name price", 0, false},
+	}
+	for _, tc := range cases {
+		got, err := detectDelimiter(tc.in)
+		if tc.ok && (err != nil || got != tc.want) {
+			t.Errorf("detectDelimiter(%q) = %v, %v; want %v", tc.in, got, err, tc.want)
+		}
+		if !tc.ok && err == nil {
+			t.Errorf("detectDelimiter(%q) expected error", tc.in)
+		}
 	}
 }
 
@@ -218,7 +233,7 @@ func TestStreamMixedRows(t *testing.T) {
 	t.Parallel()
 
 	src := strings.Join([]string{
-		"product_id,merchant_id,name,price,currency,expiration_date", // column order is free
+		"product_id,merchant_id,name,price,currency,expiration_date",
 		"p-1,m-1,Wireless Mouse,19.99,USD,2027-06-30",
 		"p-2,m-1,,19.99,USD,2027-06-30",
 		"p-3,m-1,Keyboard,19.999,USD,",
@@ -228,7 +243,7 @@ func TestStreamMixedRows(t *testing.T) {
 	}, "\n")
 
 	var rows []Row
-	stats, err := NewStreamer().Stream(context.Background(), strings.NewReader(src), func(r Row) error {
+	stats, err := NewStreamer().Stream(context.Background(), strings.NewReader(src), StreamOptions{}, func(r Row) error {
 		rows = append(rows, r)
 		return nil
 	})
@@ -274,6 +289,53 @@ func TestStreamMixedRows(t *testing.T) {
 	}
 }
 
+func TestStreamSemicolonDialect(t *testing.T) {
+	t.Parallel()
+
+	src := strings.Join([]string{
+		"name;price;expiration",
+		"Calypso - Lemonade #(4026987913289674);$115.55;1/11/2023",
+		"Wine - White\t Colubia Cresh #(3572270474512358);$126.90;11/23/2022",
+		"Veal - Loin #(5552033378109898);$72.60;12/16/2022",
+		"Shrimp - Black Tiger 8 - 12 #(3539841640347903);not-a-price;12/25/2022",
+	}, "\n")
+
+	opts := StreamOptions{DefaultMerchantID: "default", DefaultCurrency: "USD"}
+
+	var rows []Row
+	stats, err := NewStreamer().Stream(context.Background(), strings.NewReader(src), opts, func(r Row) error {
+		rows = append(rows, r)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+
+	wantStats := Stats{TotalRows: 4, ValidRows: 3, InvalidRows: 1}
+	if stats != wantStats {
+		t.Fatalf("stats = %+v, want %+v", stats, wantStats)
+	}
+
+	first := rows[0]
+	if !first.Valid() || first.Product != (events.ProductData{
+		MerchantID: "default", ProductID: "4026987913289674",
+		Name:       "Calypso - Lemonade #(4026987913289674)",
+		PriceCents: 11555, Currency: "USD", ExpirationDate: "2023-01-11",
+	}) {
+		t.Fatalf("first row = %+v", first)
+	}
+
+	if rows[1].Product.ProductID != "3572270474512358" {
+		t.Errorf("second row id = %q, want embedded sku", rows[1].Product.ProductID)
+	}
+	if rows[2].Product.ExpirationDate != "2022-12-16" {
+		t.Errorf("third row date = %q", rows[2].Product.ExpirationDate)
+	}
+	if rows[3].Valid() || !strings.Contains(rows[3].Reason, "price") {
+		t.Errorf("fourth row = %+v, want price rejection", rows[3])
+	}
+}
+
 func TestStreamRejectsBadHeaders(t *testing.T) {
 	t.Parallel()
 
@@ -281,13 +343,14 @@ func TestStreamRejectsBadHeaders(t *testing.T) {
 		desc string
 		csv  string
 	}{
-		{"missing column", "merchant_id,product_id,name,price,currency\n"},
-		{"duplicate column", "merchant_id,merchant_id,product_id,name,price,currency,expiration_date\n"},
+		{"missing column", "merchant_id,product_id\n"},
+		{"duplicate column", "merchant_id,merchant_id,name,price\n"},
 		{"empty file", ""},
+		{"no delimiter", "name price expiration\n"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.desc, func(t *testing.T) {
-			_, err := NewStreamer().Stream(context.Background(), strings.NewReader(tc.csv), func(Row) error { return nil })
+			_, err := NewStreamer().Stream(context.Background(), strings.NewReader(tc.csv), StreamOptions{}, func(Row) error { return nil })
 			if !errors.Is(err, ErrHeader) {
 				t.Fatalf("err = %v, want ErrHeader", err)
 			}
@@ -298,7 +361,7 @@ func TestStreamRejectsBadHeaders(t *testing.T) {
 func TestStreamHeaderOnly(t *testing.T) {
 	t.Parallel()
 
-	stats, err := NewStreamer().Stream(context.Background(), strings.NewReader(headerLine+"\n"), func(Row) error { return nil })
+	stats, err := NewStreamer().Stream(context.Background(), strings.NewReader(headerLine+"\n"), StreamOptions{}, func(Row) error { return nil })
 	if err != nil {
 		t.Fatalf("Stream: %v", err)
 	}
@@ -316,7 +379,7 @@ func TestStreamIgnoresExtraColumns(t *testing.T) {
 	}, "\n")
 
 	var valid int
-	stats, err := NewStreamer().Stream(context.Background(), strings.NewReader(src), func(r Row) error {
+	stats, err := NewStreamer().Stream(context.Background(), strings.NewReader(src), StreamOptions{}, func(r Row) error {
 		if r.Valid() {
 			valid++
 		}
@@ -334,7 +397,7 @@ func TestStreamStripsUTF8BOM(t *testing.T) {
 	t.Parallel()
 
 	src := "\ufeff" + headerLine + "\nm-1,p-1,Widget,10.00,USD,\n"
-	stats, err := NewStreamer().Stream(context.Background(), strings.NewReader(src), func(Row) error { return nil })
+	stats, err := NewStreamer().Stream(context.Background(), strings.NewReader(src), StreamOptions{}, func(Row) error { return nil })
 	if err != nil {
 		t.Fatalf("Stream: %v", err)
 	}
@@ -354,7 +417,7 @@ func TestStreamContinuesPastMalformedRecords(t *testing.T) {
 	}, "\n")
 
 	var rows []Row
-	stats, err := NewStreamer().Stream(context.Background(), strings.NewReader(src), func(r Row) error {
+	stats, err := NewStreamer().Stream(context.Background(), strings.NewReader(src), StreamOptions{}, func(r Row) error {
 		rows = append(rows, r)
 		return nil
 	})
@@ -381,7 +444,7 @@ func TestStreamStopsOnEmitError(t *testing.T) {
 	src := headerLine + "\n" + strings.Repeat("m-1,p-1,Widget,10.00,USD,\n", 5)
 
 	var emitted int
-	_, err := NewStreamer().Stream(context.Background(), strings.NewReader(src), func(Row) error {
+	_, err := NewStreamer().Stream(context.Background(), strings.NewReader(src), StreamOptions{}, func(Row) error {
 		emitted++
 		return sentinel
 	})
@@ -400,7 +463,7 @@ func TestStreamHonorsContextCancellation(t *testing.T) {
 	defer cancel()
 
 	var emitted int
-	_, err := NewStreamer().Stream(ctx, strings.NewReader(src), func(Row) error {
+	_, err := NewStreamer().Stream(ctx, strings.NewReader(src), StreamOptions{}, func(Row) error {
 		emitted++
 		if emitted == 3 {
 			cancel()
@@ -433,11 +496,41 @@ func TestStreamConsumesUnbufferedSource(t *testing.T) {
 		pw.Close()
 	}()
 
-	stats, err := NewStreamer().Stream(context.Background(), pr, func(Row) error { return nil })
+	stats, err := NewStreamer().Stream(context.Background(), pr, StreamOptions{}, func(Row) error { return nil })
 	if err != nil {
 		t.Fatalf("Stream: %v", err)
 	}
 	if stats.TotalRows != rows || stats.ValidRows != rows || stats.InvalidRows != 0 {
 		t.Fatalf("stats = %+v, want %d valid rows", stats, rows)
+	}
+}
+
+func TestStreamPaddedSemicolonExport(t *testing.T) {
+	t.Parallel()
+
+	// Point-of-sale exports pad lines with trailing tabs; parsing must see
+	// past the padding, including during delimiter detection.
+	src := "name;price;expiration\t\t\t\n" +
+		"Calypso - Lemonade #(4026987913289674);$115.55;1/11/2023\t\t\n" +
+		"Veal - Loin #(5552033378109898);$72.60;12/16/2022\t\n"
+
+	opts := StreamOptions{DefaultMerchantID: "default", DefaultCurrency: "USD"}
+
+	var rows []Row
+	stats, err := NewStreamer().Stream(context.Background(), strings.NewReader(src), opts, func(r Row) error {
+		rows = append(rows, r)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	if stats.TotalRows != 2 || stats.ValidRows != 2 || stats.InvalidRows != 0 {
+		t.Fatalf("stats = %+v, want 2 valid rows", stats)
+	}
+	if !rows[0].Valid() || rows[0].Product.ExpirationDate != "2023-01-11" {
+		t.Fatalf("first row = %+v, want expiration 2023-01-11", rows[0])
+	}
+	if rows[1].Product.ProductID != "5552033378109898" {
+		t.Fatalf("second row id = %q, want embedded sku", rows[1].Product.ProductID)
 	}
 }

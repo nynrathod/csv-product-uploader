@@ -1,3 +1,6 @@
+// Package config is the single source of truth for both services' runtime
+// settings. Every value is environment-overridable with a development
+// default.
 package config
 
 import (
@@ -6,27 +9,44 @@ import (
 	"strings"
 )
 
-// Config is the single source of truth for both services' runtime settings.
+// Config carries the shared and service-specific settings.
 type Config struct {
-	// importer
-	HTTPPort    string
-	ImportDBURL string
-
-	// catalog-worker
-	CatalogDBURL string
-
-	// shared
+	// Shared.
 	KafkaBrokers       []string
 	ShutdownTimeoutSec int
+
+	// Importer service.
+	HTTPPort            string
+	ImportDBURL         string
+	UploadDir           string
+	MaxUploadMB         int
+	ProgressFlushRows   int64
+	SSEPollMillis       int
+	SSEMaxDurationSec   int
+	ImportMigrationsDir string
+
+	// Catalog-worker service.
+	CatalogDBURL         string
+	CatalogMigrationsDir string
 }
 
+// Load reads the environment and applies defaults.
 func Load() Config {
 	return Config{
-		HTTPPort:           getenv("IMPORTER_HTTP_PORT", "8080"),
-		ImportDBURL:        getenv("IMPORT_DB_URL", "postgres://importer_svc:importer_dev@localhost:5432/import_db?sslmode=disable"),
-		CatalogDBURL:       getenv("CATALOG_DB_URL", "postgres://catalog_svc:catalog_dev@localhost:5432/catalog_db?sslmode=disable"),
 		KafkaBrokers:       splitCSV(getenv("KAFKA_BROKERS", "localhost:29092")),
 		ShutdownTimeoutSec: getint("SHUTDOWN_TIMEOUT_SEC", 10),
+
+		HTTPPort:            getenv("IMPORTER_HTTP_PORT", "8080"),
+		ImportDBURL:         getenv("IMPORT_DB_URL", "postgres://importer_svc:importer_dev@localhost:5433/import_db?sslmode=disable"),
+		UploadDir:           getenv("UPLOAD_DIR", ""),
+		MaxUploadMB:         getint("MAX_UPLOAD_MB", 512),
+		ProgressFlushRows:   int64(getint("PROGRESS_FLUSH_ROWS", 5000)),
+		SSEPollMillis:       getint("SSE_POLL_MILLIS", 500),
+		SSEMaxDurationSec:   getint("SSE_MAX_DURATION_SEC", 900),
+		ImportMigrationsDir: getenv("IMPORT_MIGRATIONS_DIR", "deploy/migrations/import"),
+
+		CatalogDBURL:         getenv("CATALOG_DB_URL", "postgres://catalog_svc:catalog_dev@localhost:5433/catalog_db?sslmode=disable"),
+		CatalogMigrationsDir: getenv("CATALOG_MIGRATIONS_DIR", "deploy/migrations/catalog"),
 	}
 }
 
