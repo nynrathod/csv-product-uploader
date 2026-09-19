@@ -43,7 +43,7 @@ func TestPublisherPublishesAndFlushes(t *testing.T) {
 	defer p.Close()
 
 	evt := events.ProductImported{
-		JobID:      "publisher-test",
+		JobID:      "11111111-1111-1111-1111-111111111111",
 		RowNum:     2,
 		ProducedAt: time.Now().UTC(),
 		Product: events.ProductData{

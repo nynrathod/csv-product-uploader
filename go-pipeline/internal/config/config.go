@@ -32,6 +32,7 @@ type Config struct {
 	// Catalog-worker service.
 	CatalogDBURL         string
 	CatalogMigrationsDir string
+	WorkerBatchSize      int
 }
 
 // Load reads the environment and applies defaults.
@@ -54,6 +55,8 @@ func Load() Config {
 
 		CatalogDBURL:         getenv("CATALOG_DB_URL", "postgres://catalog_svc:catalog_dev@localhost:5433/catalog_db?sslmode=disable"),
 		CatalogMigrationsDir: getenv("CATALOG_MIGRATIONS_DIR", "deploy/migrations/catalog"),
+
+		WorkerBatchSize: getint("WORKER_BATCH_SIZE", 500),
 	}
 }
 
