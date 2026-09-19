@@ -34,6 +34,10 @@ type EventPublisher interface {
 	// PublishProductImported emits one normalized product event. It must
 	// be safe for concurrent use.
 	PublishProductImported(ctx context.Context, evt events.ProductImported) error
+	// Flush waits until everything published so far is durably delivered
+	// and reports the first delivery failure, if any. Only a nil Flush
+	// makes the previously published rows durable.
+	Flush(ctx context.Context) error
 	// Close flushes and releases the underlying producer.
 	Close()
 }

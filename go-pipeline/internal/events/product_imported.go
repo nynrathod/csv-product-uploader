@@ -27,3 +27,11 @@ type ProductImported struct {
 	ProducedAt time.Time   `json:"produced_at"`
 	Product    ProductData `json:"product"`
 }
+
+// PartitionKey returns the Kafka routing key for the product: merchant and
+// product identity together. Producers use it so every event for one
+// product lands on the same partition, which is the guarantee that
+// per-product updates are consumed in the order they were published.
+func (p ProductData) PartitionKey() string {
+	return p.MerchantID + ":" + p.ProductID
+}

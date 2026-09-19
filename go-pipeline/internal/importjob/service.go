@@ -58,10 +58,11 @@ func (s *ImportService) StartImport(ctx context.Context, filePath, fileName stri
 	return job, nil
 }
 
-// process streams the file, publishes valid rows and keeps the job's
-// progress current, then applies the terminal status. processed_rows is
-// advanced by the catalog worker's progress events once a worker is
-// deployed; until then completion reflects the importer's own work.
+// process streams the file, publishes every valid row as a product event,
+// and keeps the job's progress current, then applies the terminal status.
+// Completion is a durability guarantee: the event stream is flushed and
+// broker-confirmed before the job is marked completed. processed_rows is
+// advanced by the catalog worker's progress events as consumption proceeds.
 func (s *ImportService) process(jobID, filePath string, opts StreamOptions) {
 	ctx, cancel := context.WithTimeout(context.Background(), maxImportDuration)
 	defer cancel()
@@ -106,6 +107,13 @@ func (s *ImportService) process(jobID, filePath string, opts StreamOptions) {
 
 	if err != nil {
 		s.fail(ctx, jobID, err)
+		return
+	}
+
+	// Flush before completing: a nil flush means every published event is
+	// confirmed by the broker's in-sync replicas, not merely buffered.
+	if err := s.publisher.Flush(ctx); err != nil {
+		s.fail(ctx, jobID, fmt.Errorf("delivering published events: %w", err))
 		return
 	}
 	if err := s.flushProgress(ctx, jobID, total, valid, invalid, published); err != nil {

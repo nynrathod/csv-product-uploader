@@ -9,6 +9,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/nynrathod/csv-product-uploader/go-pipeline/internal/events"
 )
 
 // memStore is an in-memory JobStore for tests.
@@ -236,5 +238,89 @@ func TestExternalStatusMapping(t *testing.T) {
 		if got := externalStatus(in); got != want {
 			t.Errorf("externalStatus(%s) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// fakePublisher records published events for assertions and counts flushes.
+type fakePublisher struct {
+	mu      sync.Mutex
+	events  []events.ProductImported
+	flushes int
+}
+
+func (f *fakePublisher) PublishProductImported(_ context.Context, evt events.ProductImported) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.events = append(f.events, evt)
+	return nil
+}
+
+func (f *fakePublisher) Flush(context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.flushes++
+	return nil
+}
+
+func (f *fakePublisher) Close() {}
+
+func (f *fakePublisher) snapshot() ([]events.ProductImported, int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]events.ProductImported(nil), f.events...), f.flushes
+}
+
+func TestImportServicePublishesValidRows(t *testing.T) {
+	t.Parallel()
+
+	csvData := "name;price;expiration\n" +
+		"Calypso - Lemonade #(4026987913289674);$115.55;1/11/2023\n" +
+		"Broken Item;not-a-price;\n" +
+		"Veal - Loin #(5552033378109898);$72.60;12/16/2022\n"
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "products.csv")
+	if err := os.WriteFile(path, []byte(csvData), 0o600); err != nil {
+		t.Fatalf("writing fixture: %v", err)
+	}
+
+	store := newMemStore()
+	pub := &fakePublisher{}
+	svc := NewImportService(store, pub, 1)
+
+	job, err := svc.StartImport(context.Background(), path, "products.csv", StreamOptions{
+		DefaultMerchantID: "default",
+		DefaultCurrency:   "USD",
+	})
+	if err != nil {
+		t.Fatalf("StartImport: %v", err)
+	}
+
+	final := waitTerminal(t, store, job.ID, 5*time.Second)
+	if final.Status != StatusCompleted {
+		t.Fatalf("status = %s, lastError = %v", final.Status, final.LastError)
+	}
+
+	published, flushes := pub.snapshot()
+	if len(published) != 2 {
+		t.Fatalf("published %d events, want the 2 valid rows", len(published))
+	}
+	if flushes == 0 {
+		t.Fatal("completion must follow a publisher flush")
+	}
+
+	first, second := published[0], published[1]
+	if first.JobID != job.ID || second.JobID != job.ID {
+		t.Fatalf("event job ids = %q, %q; want %q", first.JobID, second.JobID, job.ID)
+	}
+	if first.RowNum != 2 || second.RowNum != 4 {
+		t.Fatalf("event row nums = %d, %d; want 2 and 4 (file rows; the header is 1)",
+			first.RowNum, second.RowNum)
+	}
+	if first.Product.ProductID != "4026987913289674" || second.Product.ProductID != "5552033378109898" {
+		t.Fatalf("event product ids = %q, %q", first.Product.ProductID, second.Product.ProductID)
+	}
+	if first.Product.PriceCents != 11555 || second.Product.PriceCents != 7260 {
+		t.Fatalf("event prices = %d, %d", first.Product.PriceCents, second.Product.PriceCents)
 	}
 }

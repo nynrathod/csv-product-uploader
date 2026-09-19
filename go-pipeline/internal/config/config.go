@@ -15,6 +15,10 @@ type Config struct {
 	KafkaBrokers       []string
 	ShutdownTimeoutSec int
 
+	// Event production.
+	ProducerLingerMillis int
+	MaxBufferedRecords   int
+
 	// Importer service.
 	HTTPPort            string
 	ImportDBURL         string
@@ -35,6 +39,9 @@ func Load() Config {
 	return Config{
 		KafkaBrokers:       splitCSV(getenv("KAFKA_BROKERS", "localhost:29092")),
 		ShutdownTimeoutSec: getint("SHUTDOWN_TIMEOUT_SEC", 10),
+
+		ProducerLingerMillis: getint("PRODUCER_LINGER_MILLIS", 5),
+		MaxBufferedRecords:   getint("PRODUCER_MAX_BUFFERED_RECORDS", 50000),
 
 		HTTPPort:            getenv("IMPORTER_HTTP_PORT", "8080"),
 		ImportDBURL:         getenv("IMPORT_DB_URL", "postgres://importer_svc:importer_dev@localhost:5433/import_db?sslmode=disable"),

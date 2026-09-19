@@ -15,6 +15,7 @@ import (
 
 	"github.com/nynrathod/csv-product-uploader/go-pipeline/internal/config"
 	"github.com/nynrathod/csv-product-uploader/go-pipeline/internal/importjob"
+	"github.com/nynrathod/csv-product-uploader/go-pipeline/internal/kafka"
 	"github.com/nynrathod/csv-product-uploader/go-pipeline/internal/postgres"
 )
 
@@ -47,7 +48,26 @@ func main() {
 		log.Printf("marked %d interrupted import(s) as failed", n)
 	}
 
-	service := importjob.NewImportService(store, importjob.NoopPublisher{}, cfg.ProgressFlushRows)
+	// The event backbone is declared, not implied: the broker disables
+	// auto-creation, so the platform's topics exist before the first
+	// publish. The call is idempotent.
+	if err := kafka.EnsureTopics(ctx, cfg.KafkaBrokers); err != nil {
+		log.Fatalf("ensuring kafka topics: %v", err)
+	}
+
+	publisher, err := kafka.NewPublisher(kafka.PublisherConfig{
+		Brokers:            cfg.KafkaBrokers,
+		ClientID:           "importer",
+		Linger:             time.Duration(cfg.ProducerLingerMillis) * time.Millisecond,
+		MaxBufferedRecords: cfg.MaxBufferedRecords,
+		DeliveryTimeout:    30 * time.Second,
+	})
+	if err != nil {
+		log.Fatalf("creating the event publisher: %v", err)
+	}
+	defer publisher.Close()
+
+	service := importjob.NewImportService(store, publisher, cfg.ProgressFlushRows)
 
 	app := fiber.New(fiber.Config{
 		// Streaming request bodies keep multipart uploads out of RAM; the
