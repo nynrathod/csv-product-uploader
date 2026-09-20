@@ -12,10 +12,10 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/nynrathod/csv-product-uploader/go-pipeline/internal/catalog"
-	"github.com/nynrathod/csv-product-uploader/go-pipeline/internal/config"
-	"github.com/nynrathod/csv-product-uploader/go-pipeline/internal/kafka"
-	"github.com/nynrathod/csv-product-uploader/go-pipeline/internal/postgres"
+	"github.com/nynrathod/csv-product-uploader/catalog-stream/internal/catalog"
+	"github.com/nynrathod/csv-product-uploader/catalog-stream/internal/config"
+	"github.com/nynrathod/csv-product-uploader/catalog-stream/internal/kafka"
+	"github.com/nynrathod/csv-product-uploader/catalog-stream/internal/postgres"
 )
 
 func main() {

@@ -10,7 +10,7 @@ import (
 
 	"github.com/twmb/franz-go/pkg/kgo"
 
-	"github.com/nynrathod/csv-product-uploader/go-pipeline/internal/events"
+	"github.com/nynrathod/csv-product-uploader/catalog-stream/internal/events"
 )
 
 // EventSource supplies consumed records and offset commits for the

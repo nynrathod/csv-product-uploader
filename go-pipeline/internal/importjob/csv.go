@@ -17,7 +17,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/nynrathod/csv-product-uploader/go-pipeline/internal/events"
+	"github.com/nynrathod/csv-product-uploader/catalog-stream/internal/events"
 )
 
 // ErrHeader reports a CSV file whose header row cannot be mapped onto the

@@ -7,7 +7,7 @@ import (
 
 	"github.com/twmb/franz-go/pkg/kgo"
 
-	"github.com/nynrathod/csv-product-uploader/go-pipeline/internal/events"
+	"github.com/nynrathod/csv-product-uploader/catalog-stream/internal/events"
 )
 
 // fakeWriter applies products or fails on demand.

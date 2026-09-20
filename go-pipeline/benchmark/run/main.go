@@ -28,8 +28,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/nynrathod/csv-product-uploader/go-pipeline/internal/events"
-	"github.com/nynrathod/csv-product-uploader/go-pipeline/internal/kafka"
+	"github.com/nynrathod/csv-product-uploader/catalog-stream/internal/events"
+	"github.com/nynrathod/csv-product-uploader/catalog-stream/internal/kafka"
 )
 
 // jobStatus mirrors the importer's public job representation.

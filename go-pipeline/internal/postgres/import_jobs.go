@@ -10,7 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/nynrathod/csv-product-uploader/go-pipeline/internal/importjob"
+	"github.com/nynrathod/csv-product-uploader/catalog-stream/internal/importjob"
 )
 
 // JobStore persists import jobs in the importer-owned import_db.

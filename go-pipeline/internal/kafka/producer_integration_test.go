@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nynrathod/csv-product-uploader/go-pipeline/internal/events"
+	"github.com/nynrathod/csv-product-uploader/catalog-stream/internal/events"
 )
 
 // brokerEnv opts into integration tests against a live broker; plain unit

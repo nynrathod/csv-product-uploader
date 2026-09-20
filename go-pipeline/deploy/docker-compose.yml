@@ -1,4 +1,4 @@
-name: go-pipeline
+name: catalog-stream
 
 services:
   kafka:

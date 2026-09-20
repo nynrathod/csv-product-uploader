@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/nynrathod/csv-product-uploader/go-pipeline/internal/events"
+	"github.com/nynrathod/csv-product-uploader/catalog-stream/internal/events"
 )
 
 // maxImportDuration bounds a single import's processing time so an

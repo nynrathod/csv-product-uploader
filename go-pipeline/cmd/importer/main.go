@@ -13,10 +13,10 @@ import (
 	"github.com/gofiber/fiber/v3/middleware/logger"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/nynrathod/csv-product-uploader/go-pipeline/internal/config"
-	"github.com/nynrathod/csv-product-uploader/go-pipeline/internal/importjob"
-	"github.com/nynrathod/csv-product-uploader/go-pipeline/internal/kafka"
-	"github.com/nynrathod/csv-product-uploader/go-pipeline/internal/postgres"
+	"github.com/nynrathod/csv-product-uploader/catalog-stream/internal/config"
+	"github.com/nynrathod/csv-product-uploader/catalog-stream/internal/importjob"
+	"github.com/nynrathod/csv-product-uploader/catalog-stream/internal/kafka"
+	"github.com/nynrathod/csv-product-uploader/catalog-stream/internal/postgres"
 )
 
 func main() {

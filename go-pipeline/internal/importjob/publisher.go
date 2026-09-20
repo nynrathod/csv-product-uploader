@@ -3,7 +3,7 @@ package importjob
 import (
 	"context"
 
-	"github.com/nynrathod/csv-product-uploader/go-pipeline/internal/events"
+	"github.com/nynrathod/csv-product-uploader/catalog-stream/internal/events"
 )
 
 // NoopPublisher discards published events. Tests use it to exercise the

@@ -6,7 +6,7 @@ package catalog
 import (
 	"fmt"
 
-	"github.com/nynrathod/csv-product-uploader/go-pipeline/internal/events"
+	"github.com/nynrathod/csv-product-uploader/catalog-stream/internal/events"
 )
 
 // Product is a catalog record materialized from one ProductImported event.

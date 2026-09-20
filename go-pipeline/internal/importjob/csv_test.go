@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/nynrathod/csv-product-uploader/go-pipeline/internal/events"
+	"github.com/nynrathod/csv-product-uploader/catalog-stream/internal/events"
 )
 
 const headerLine = "merchant_id,product_id,name,price,currency,expiration_date"

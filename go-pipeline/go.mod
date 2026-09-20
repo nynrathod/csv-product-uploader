@@ -1,4 +1,4 @@
-module github.com/nynrathod/csv-product-uploader/go-pipeline
+module github.com/nynrathod/csv-product-uploader/catalog-stream
 
 go 1.26.0
 

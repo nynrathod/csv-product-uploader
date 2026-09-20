@@ -6,7 +6,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/nynrathod/csv-product-uploader/go-pipeline/internal/catalog"
+	"github.com/nynrathod/csv-product-uploader/catalog-stream/internal/catalog"
 )
 
 // ProductWriter applies product upserts to the catalog database.
