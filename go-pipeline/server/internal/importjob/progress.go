@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"regexp"
+	"sync"
 
 	"github.com/twmb/franz-go/pkg/kgo"
 
@@ -36,6 +37,9 @@ var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]
 type ProgressTracker struct {
 	store  JobStore
 	source EventSource
+	latMu  sync.Mutex
+	lat    LatencySummary
+	hasLat bool
 }
 
 // NewProgressTracker wires the tracker.
@@ -101,5 +105,29 @@ func (t *ProgressTracker) apply(ctx context.Context, rec *kgo.Record) bool {
 		log.Printf("progress tracker: applying progress for job %s failed: %v", evt.JobID, err)
 		return false
 	}
+
+	// The worker reports its measured event-to-database latency with the
+	// progress snapshot; the latest report is the platform's live
+	// latency figure.
+	if evt.LatencySamples > 0 {
+		t.latMu.Lock()
+		t.lat = LatencySummary{
+			Samples: evt.LatencySamples,
+			P50MS:   evt.LatencyP50Ms,
+			P95MS:   evt.LatencyP95Ms,
+			MaxMS:   evt.LatencyMaxMs,
+		}
+		t.hasLat = true
+		t.latMu.Unlock()
+	}
 	return true
+}
+
+// Latency returns the worker-reported event-to-database latency: the
+// platform's single source of truth, measured on the real catalog write
+// path.
+func (t *ProgressTracker) Latency() (LatencySummary, bool) {
+	t.latMu.Lock()
+	defer t.latMu.Unlock()
+	return t.lat, t.hasLat
 }

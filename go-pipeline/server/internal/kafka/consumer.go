@@ -232,7 +232,7 @@ func NewProgressReporter(cfg PublisherConfig, workerID string) (*ProgressReporte
 
 // ReportProgress publishes the worker's cumulative processed, retried and
 // dead counts for a job.
-func (r *ProgressReporter) ReportProgress(ctx context.Context, jobID string, processed, retried, dead int64) error {
+func (r *ProgressReporter) ReportProgress(ctx context.Context, jobID string, processed, retried, dead int64, latSamples int, latP50, latP95, latMax float64) error {
 	evt := events.ImportProgress{
 		JobID:         jobID,
 		WorkerID:      r.workerID,
@@ -240,6 +240,11 @@ func (r *ProgressReporter) ReportProgress(ctx context.Context, jobID string, pro
 		RetriedRows:   retried,
 		DeadRows:      dead,
 		ReportedAt:    time.Now().UTC(),
+
+		LatencySamples: latSamples,
+		LatencyP50Ms:   latP50,
+		LatencyP95Ms:   latP95,
+		LatencyMaxMs:   latMax,
 	}
 	value, err := json.Marshal(evt)
 	if err != nil {

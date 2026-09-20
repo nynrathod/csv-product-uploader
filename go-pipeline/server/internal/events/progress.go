@@ -16,4 +16,9 @@ type ImportProgress struct {
 	RetriedRows   int64     `json:"retried_rows"`
 	DeadRows      int64     `json:"dead_rows"`
 	ReportedAt    time.Time `json:"reported_at"`
+
+	LatencySamples int     `json:"latency_samples,omitempty"`
+	LatencyP50Ms   float64 `json:"latency_p50_ms,omitempty"`
+	LatencyP95Ms   float64 `json:"latency_p95_ms,omitempty"`
+	LatencyMaxMs   float64 `json:"latency_max_ms,omitempty"`
 }

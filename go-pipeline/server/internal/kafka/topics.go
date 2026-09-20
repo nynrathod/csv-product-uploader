@@ -29,4 +29,5 @@ const (
 const (
 	GroupCatalogWriter = "catalog-writer"
 	GroupImportTracker = "import-tracker"
+	GroupImportReader  = "import-reader"
 )

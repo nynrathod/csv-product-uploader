@@ -56,7 +56,7 @@ type fakeReporter struct {
 	reports []events.ImportProgress
 }
 
-func (f *fakeReporter) ReportProgress(_ context.Context, jobID string, processed, retried, dead int64) error {
+func (f *fakeReporter) ReportProgress(_ context.Context, jobID string, processed, retried, dead int64, _ int, _, _, _ float64) error {
 	f.reports = append(f.reports, events.ImportProgress{
 		JobID: jobID, ProcessedRows: processed, RetriedRows: retried, DeadRows: dead,
 	})

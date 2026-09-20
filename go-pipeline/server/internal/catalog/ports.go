@@ -58,7 +58,10 @@ type EventRepublisher interface {
 // ProgressReporter announces import progress back onto the event stream so
 // the importer advances its job without any database or RPC coupling.
 type ProgressReporter interface {
-	ReportProgress(ctx context.Context, jobID string, processed, retried, dead int64) error
+	// ReportProgress publishes the worker's cumulative processed,
+	// retried and dead counts for one import job, together with its
+	// measured event-to-database latency percentiles.
+	ReportProgress(ctx context.Context, jobID string, processed, retried, dead int64, latencySamples int, latencyP50MS, latencyP95MS, latencyMaxMS float64) error
 	Flush(ctx context.Context) error
 	Close()
 }

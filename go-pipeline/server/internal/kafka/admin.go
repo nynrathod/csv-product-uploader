@@ -80,3 +80,66 @@ func ensureTopicsOnce(ctx context.Context, adm *kadm.Client) error {
 	}
 	return nil
 }
+
+// GroupLagSource for the importer's metrics: summed consumer lag.
+type AdminLagSource struct {
+	cl *kgo.Client
+}
+
+// NewAdminLagSource builds a lag source from a dedicated client.
+func NewAdminLagSource(brokers []string) (*AdminLagSource, error) {
+	cl, err := kgo.NewClient(
+		kgo.SeedBrokers(brokers...),
+		kgo.ClientID("metrics-lag"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("creating lag client: %w", err)
+	}
+	return &AdminLagSource{cl: cl}, nil
+}
+
+// Close releases the client.
+func (a *AdminLagSource) Close() { a.cl.Close() }
+
+// GroupLag returns the summed lag of a consumer group: the difference
+// between each partition's log end offset and the group's committed
+// offset. Responses are keyed by topic and partition, so both are read
+// directly from the maps.
+func (a *AdminLagSource) GroupLag(ctx context.Context, group string) (int64, error) {
+	adm := kadm.NewClient(a.cl)
+
+	committed, err := adm.FetchOffsets(ctx, group)
+	if err != nil {
+		return 0, fmt.Errorf("fetching committed offsets: %w", err)
+	}
+
+	// The group's assigned topics are the committed response's keys.
+	topics := make([]string, 0, len(committed))
+	for t := range committed {
+		topics = append(topics, t)
+	}
+	if len(topics) == 0 {
+		return 0, nil
+	}
+
+	ends, err := adm.ListEndOffsets(ctx, topics...)
+	if err != nil {
+		return 0, fmt.Errorf("listing end offsets: %w", err)
+	}
+
+	var total int64
+	for topic, partitions := range ends {
+		for partition, end := range partitions {
+			at, ok := committed[topic][partition]
+			if !ok || at.At < 0 {
+				// No committed offset: the whole partition is lag.
+				total += end.Offset
+				continue
+			}
+			if lag := end.Offset - at.At; lag > 0 {
+				total += lag
+			}
+		}
+	}
+	return total, nil
+}

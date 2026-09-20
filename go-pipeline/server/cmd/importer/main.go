@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v3"
+	"github.com/gofiber/fiber/v3/middleware/cors"
 	"github.com/gofiber/fiber/v3/middleware/logger"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -39,6 +40,7 @@ func main() {
 	}
 
 	store := postgres.NewJobStore(pool)
+	projectionStore := postgres.NewProjectionStore(pool)
 
 	// Jobs orphaned by a previous restart or crash are failed explicitly so
 	// they never hang in a non-terminal state.
@@ -69,9 +71,8 @@ func main() {
 
 	service := importjob.NewImportService(store, publisher, cfg.ProgressFlushRows)
 
-	// The progress tracker is the importer's own consumer: it folds the
-	// catalog worker's progress events into the import jobs this service
-	// owns, completing them once the catalog confirms every event.
+	// The progress tracker folds the catalog worker's confirmation events
+	// into the jobs this service owns.
 	progressConsumer, err := kafka.NewConsumer(kafka.ConsumerConfig{
 		Brokers:  cfg.KafkaBrokers,
 		Group:    kafka.GroupImportTracker,
@@ -80,16 +81,31 @@ func main() {
 	if err != nil {
 		log.Fatalf("creating the progress consumer: %v", err)
 	}
-
 	tracker := importjob.NewProgressTracker(store, progressConsumer)
 	trackerDone := make(chan struct{})
 	go func() {
 		defer close(trackerDone)
 		if err := tracker.Run(ctx); err != nil {
-			// Without the tracker, imports can never observe catalog
-			// confirmation; failing fast surfaces the fault instead of
-			// silently freezing jobs.
 			log.Fatalf("progress tracker exited: %v", err)
+		}
+	}()
+
+	// The product projector maintains this service's own read model of
+	// products, derived from the same events the catalog worker consumes.
+	projectionConsumer, err := kafka.NewConsumer(kafka.ConsumerConfig{
+		Brokers:  cfg.KafkaBrokers,
+		Group:    kafka.GroupImportReader,
+		ClientID: "import-projection",
+	}, kafka.TopicProductImported)
+	if err != nil {
+		log.Fatalf("creating the projection consumer: %v", err)
+	}
+	projector := importjob.NewProductProjector(projectionStore, projectionConsumer)
+	projectorDone := make(chan struct{})
+	go func() {
+		defer close(projectorDone)
+		if err := projector.Run(ctx); err != nil {
+			log.Fatalf("product projector exited: %v", err)
 		}
 	}()
 
@@ -100,6 +116,9 @@ func main() {
 		BodyLimit:         cfg.MaxUploadMB << 20,
 	})
 
+	// Browser clients call the API from a different origin in split
+	// deployments; the surface is read-mostly and public.
+	app.Use(cors.New())
 	app.Use(logger.New())
 
 	handler := importjob.NewHTTPHandler(service, store, importjob.HandlerConfig{
@@ -109,6 +128,20 @@ func main() {
 		SSEMaxDuration:  time.Duration(cfg.SSEMaxDurationSec) * time.Second,
 	})
 	handler.Register(app)
+
+	productsHandler := importjob.NewProductsHandler(projectionStore)
+	productsHandler.Register(app)
+
+	// after the tracker goroutine block:
+
+	lagSource, err := kafka.NewAdminLagSource(cfg.KafkaBrokers)
+	if err != nil {
+		log.Fatalf("creating the lag source: %v", err)
+	}
+	defer lagSource.Close()
+
+	metricsHandler := importjob.NewMetricsHandler(store, lagSource, tracker)
+	metricsHandler.Register(app)
 
 	app.Get("/health", func(c fiber.Ctx) error {
 		return c.JSON(fiber.Map{
@@ -125,10 +158,12 @@ func main() {
 		ShutdownTimeout: time.Duration(cfg.ShutdownTimeoutSec) * time.Second,
 	})
 
-	// The HTTP server is down; the tracker drains and stops with the
-	// cancelled context before its consumer is released.
+	// The HTTP server is down; both consumers drain and stop with the
+	// cancelled context before their clients are released.
 	<-trackerDone
 	progressConsumer.Close()
+	<-projectorDone
+	projectionConsumer.Close()
 
 	if err != nil && !errors.Is(err, context.Canceled) {
 		log.Fatalf("importer exited: %v", err)

@@ -19,12 +19,15 @@ func NewProductWriter(pool *pgxpool.Pool) *ProductWriter {
 	return &ProductWriter{pool: pool}
 }
 
-// UpsertBatch applies every product as one unnest-driven upsert: the whole
-// batch is a single statement and a single network round trip, which keeps
-// catalog drain rate limited by the database, not by statement chatter.
-// The upsert is idempotent on the (merchant_id, product_id) natural key:
-// re-applying the same product updates the same row instead of duplicating
-// it, which is what makes at-least-once delivery safe.
+// UpsertBatch applies every product as one unnest-driven upsert. The
+// batch is deduplicated on the natural key inside the statement: a
+// product stream legitimately carries repeated identities, and
+// PostgreSQL rejects ON CONFLICT statements that would touch the same
+// row twice. The last occurrence per identity wins, matching
+// current-state semantics. The upsert is idempotent on the
+// (merchant_id, product_id) natural key: re-applying the same product
+// updates the same row instead of duplicating it, which is what makes
+// at-least-once delivery safe.
 func (w *ProductWriter) UpsertBatch(ctx context.Context, products []catalog.Product) error {
 	if len(products) == 0 {
 		return nil
@@ -52,8 +55,12 @@ func (w *ProductWriter) UpsertBatch(ctx context.Context, products []catalog.Prod
 	_, err := w.pool.Exec(ctx, `
         INSERT INTO products (merchant_id, product_id, name, price_cents, currency, expiration_date, source_job_id)
         SELECT m, p, n, pr, c, NULLIF(e, '')::date, j::uuid
-        FROM unnest($1::text[], $2::text[], $3::text[], $4::bigint[], $5::text[], $6::text[], $7::text[])
-            AS t(m, p, n, pr, c, e, j)
+        FROM (
+            SELECT DISTINCT ON (m, p) m, p, n, pr, c, e, j
+            FROM unnest($1::text[], $2::text[], $3::text[], $4::bigint[], $5::text[], $6::text[], $7::text[])
+                WITH ORDINALITY AS t(m, p, n, pr, c, e, j, ord)
+            ORDER BY m, p, ord DESC
+        ) AS batch
         ON CONFLICT (merchant_id, product_id) DO UPDATE
         SET name = EXCLUDED.name,
             price_cents = EXCLUDED.price_cents,

@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"regexp"
+	"sort"
 	"sync"
 	"time"
 
@@ -46,6 +48,9 @@ type Service struct {
 
 	mu   sync.Mutex
 	jobs map[string]*jobEntry
+
+	latMu   sync.Mutex
+	latWins []float64
 }
 
 // NewService wires the processing service, applying safe defaults.
@@ -129,7 +134,54 @@ func (s *Service) ProcessBatch(ctx context.Context, evts []Event) error {
 		s.entryLocked(evt.JobID).dead++
 	}
 	s.mu.Unlock()
+
+	// Latency is sampled at the moment the catalog write committed: the
+	// write time minus each event's production time. This is the
+	// platform's single source of truth for event-to-database latency.
+	s.recordLatencies(validEvts, time.Now().UTC())
 	return nil
+}
+
+// recordLatencies samples event-to-database latency for a committed
+// batch: every event in one unnest statement is written atomically, so
+// the batch's write completion time serves as each event's database
+// time. This is the platform's single source of truth for latency —
+// measured on the real path, at the real write.
+func (s *Service) recordLatencies(evts []Event, writeTime time.Time) {
+	s.latMu.Lock()
+	defer s.latMu.Unlock()
+	for _, e := range evts {
+		ms := writeTime.Sub(e.ProducedAt).Seconds() * 1000
+		if ms < 0 {
+			ms = 0
+		}
+		s.latWins = append(s.latWins, ms)
+	}
+	if len(s.latWins) > 4096 {
+		s.latWins = s.latWins[len(s.latWins)-4096:]
+	}
+}
+
+// LatencySummary returns percentiles over the rolling window.
+func (s *Service) LatencySummary() (samples int, p50, p95, max float64) {
+	s.latMu.Lock()
+	w := append([]float64(nil), s.latWins...)
+	s.latMu.Unlock()
+	if len(w) == 0 {
+		return 0, 0, 0, 0
+	}
+	sort.Float64s(w)
+	pick := func(p float64) float64 {
+		i := int(math.Ceil(p*float64(len(w)))) - 1
+		if i < 0 {
+			i = 0
+		}
+		if i >= len(w) {
+			i = len(w) - 1
+		}
+		return w[i]
+	}
+	return len(w), pick(0.50), pick(0.95), w[len(w)-1]
 }
 
 // ProcessPoison dead-letters a record whose payload could not be decoded:
@@ -179,11 +231,16 @@ func (s *Service) FlushProgress(ctx context.Context) error {
 		return nil
 	}
 
+	// The worker's measured event-to-database latency travels with every
+	// progress snapshot; the importer's live metrics surface it directly.
+	latSamples, latP50, latP95, latMax := s.LatencySummary()
+
 	for _, r := range pending {
-		if err := s.reporter.ReportProgress(ctx, r.jobID, r.applied, r.retried, r.dead); err != nil {
+		if err := s.reporter.ReportProgress(ctx, r.jobID, r.applied, r.retried, r.dead, latSamples, latP50, latP95, latMax); err != nil {
 			return fmt.Errorf("reporting progress for job %s: %w", r.jobID, err)
 		}
 	}
+
 	if err := s.reporter.Flush(ctx); err != nil {
 		return err
 	}

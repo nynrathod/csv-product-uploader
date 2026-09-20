@@ -45,3 +45,30 @@ type EventPublisher interface {
 	// Close flushes and releases the underlying producer.
 	Close()
 }
+
+// LatencySummary carries measured latency percentiles in milliseconds.
+type LatencySummary struct {
+	Samples int
+	P50MS   float64
+	P95MS   float64
+	MaxMS   float64
+}
+
+// ProductQuery selects one page of the product projection.
+type ProductQuery struct {
+	FilterName string
+	SortBy     string
+	SortOrder  string
+	Limit      int
+	Offset     int
+}
+
+// ProjectionStore maintains the importer's own read model of products.
+// The projection is derived exclusively from the product event stream, so
+// the importer serves catalog queries without ever touching the catalog
+// database: the same events feed the catalog-worker's write model and
+// this read model.
+type ProjectionStore interface {
+	UpsertProducts(ctx context.Context, evts []events.ProductImported) error
+	ListProducts(ctx context.Context, jobID string, q ProductQuery) ([]events.ProductData, int64, error)
+}
