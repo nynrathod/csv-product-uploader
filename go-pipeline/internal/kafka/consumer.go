@@ -15,17 +15,18 @@ import (
 
 // ConsumerConfig tunes the consuming worker.
 type ConsumerConfig struct {
-	Brokers       []string
-	Group         string
-	ClientID      string
-	FetchMaxBytes int32
-	MaxWait       time.Duration
+	Brokers        []string
+	Group          string
+	ClientID       string
+	FetchMaxBytes  int32
+	MaxWait        time.Duration
+	MaxPollRecords int
 }
-
-// Consumer wraps a franz-go client in group consume mode and satisfies the
-// catalog worker's RecordSource port.
 type Consumer struct {
 	cl *kgo.Client
+	// maxPoll bounds how many records one poll returns; larger polls
+	// amortize offset commits and database transactions.
+	maxPoll int
 }
 
 // NewConsumer builds a group member subscribing to the given topics.
@@ -40,11 +41,21 @@ func NewConsumer(cfg ConsumerConfig, topics ...string) (*Consumer, error) {
 		cfg.MaxWait = 250 * time.Millisecond
 	}
 
+	if cfg.MaxPollRecords <= 0 {
+		cfg.MaxPollRecords = 5000
+	}
+
 	cl, err := kgo.NewClient(
 		kgo.SeedBrokers(cfg.Brokers...),
 		kgo.ClientID(cfg.ClientID),
 		kgo.ConsumerGroup(cfg.Group),
 		kgo.ConsumeTopics(topics...),
+
+		// A dead member's partitions cannot be reassigned until the
+		// broker's session timeout evicts it; a short session keeps
+		// crash recovery to seconds instead of a minute.
+		kgo.SessionTimeout(10*time.Second),
+		kgo.HeartbeatInterval(2*time.Second),
 
 		// Offsets are committed explicitly after events are durably
 		// applied or republished; automatic commits are disabled so a
@@ -66,7 +77,7 @@ func NewConsumer(cfg ConsumerConfig, topics ...string) (*Consumer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("creating consumer client: %w", err)
 	}
-	return &Consumer{cl: cl}, nil
+	return &Consumer{cl: cl, maxPoll: cfg.MaxPollRecords}, nil
 }
 
 // Poll returns records for one poll window; empty when idle. Partition
@@ -75,7 +86,7 @@ func NewConsumer(cfg ConsumerConfig, topics ...string) (*Consumer, error) {
 // until the next poll: the worker fully adjudicates every record, and
 // copies payloads out while decoding, before polling again.
 func (c *Consumer) Poll(ctx context.Context) []*kgo.Record {
-	fetches := c.cl.PollRecords(ctx, 500)
+	fetches := c.cl.PollRecords(ctx, c.maxPoll)
 
 	fetches.EachError(func(topic string, partition int32, err error) {
 		log.Printf("fetch error on %s/%d: %v", topic, partition, err)
@@ -188,13 +199,19 @@ func (r *EventRepublisher) Close() {
 	r.cl.Close()
 }
 
-// ProgressReporter publishes import progress events.
+// ProgressReporter publishes import progress events, stamped with the
+// reporting worker's identity so the importer can fold each worker's
+// snapshot independently and derive job totals as the sum across
+// workers.
 type ProgressReporter struct {
-	cl *kgo.Client
+	cl       *kgo.Client
+	workerID string
 }
 
 // NewProgressReporter builds a reporter from a dedicated producer client.
-func NewProgressReporter(cfg PublisherConfig) (*ProgressReporter, error) {
+// workerID identifies the reporting worker process; every event it
+// publishes carries the identity.
+func NewProgressReporter(cfg PublisherConfig, workerID string) (*ProgressReporter, error) {
 	if cfg.ClientID == "" {
 		cfg.ClientID = "progress-reporter"
 	}
@@ -210,13 +227,15 @@ func NewProgressReporter(cfg PublisherConfig) (*ProgressReporter, error) {
 	if err != nil {
 		return nil, fmt.Errorf("creating progress producer: %w", err)
 	}
-	return &ProgressReporter{cl: cl}, nil
+	return &ProgressReporter{cl: cl, workerID: workerID}, nil
 }
 
-// ReportProgress publishes processed, retried and dead counts for a job.
+// ReportProgress publishes the worker's cumulative processed, retried and
+// dead counts for a job.
 func (r *ProgressReporter) ReportProgress(ctx context.Context, jobID string, processed, retried, dead int64) error {
 	evt := events.ImportProgress{
 		JobID:         jobID,
+		WorkerID:      r.workerID,
 		ProcessedRows: processed,
 		RetriedRows:   retried,
 		DeadRows:      dead,

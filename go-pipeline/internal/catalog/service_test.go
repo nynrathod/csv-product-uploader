@@ -12,18 +12,13 @@ import (
 
 // fakeWriter applies products or fails on demand.
 type fakeWriter struct {
-	failAll   bool
-	failFirst int // number of single-event writes to fail before succeeding
-	written   []Product
+	failAll bool
+	written []Product
 }
 
 func (f *fakeWriter) UpsertBatch(_ context.Context, products []Product) error {
 	if f.failAll {
 		return errors.New("catalog unavailable")
-	}
-	if len(products) == 1 && f.failFirst > 0 {
-		f.failFirst--
-		return errors.New("transient write failure")
 	}
 	f.written = append(f.written, products...)
 	return nil
@@ -31,7 +26,7 @@ func (f *fakeWriter) UpsertBatch(_ context.Context, products []Product) error {
 
 // fakeRetrier records republished events.
 type fakeRetrier struct {
-	retries map[string]int // key: partition key, value: attempts
+	retries map[string]int
 	deads   []string
 	raws    int
 }
@@ -71,7 +66,7 @@ func (f *fakeReporter) ReportProgress(_ context.Context, jobID string, processed
 func (f *fakeReporter) Flush(context.Context) error { return nil }
 func (f *fakeReporter) Close()                      {}
 
-func mkEvent(jobID, merchant, product string, attempt int) Event {
+func mkEvent(jobID, merchant, product string) Event {
 	return Event{
 		ProductImported: events.ProductImported{
 			JobID:  jobID,
@@ -81,7 +76,7 @@ func mkEvent(jobID, merchant, product string, attempt int) Event {
 				PriceCents: 1999, Currency: "USD",
 			},
 		},
-		Attempt: attempt,
+		Attempt: 0,
 	}
 }
 
@@ -94,8 +89,8 @@ func TestProcessBatchAppliesAll(t *testing.T) {
 	svc := NewService(writer, LinearRetryPolicy{}, retrier, reporter, ProcessingLimits{})
 
 	err := svc.ProcessBatch(context.Background(), []Event{
-		mkEvent("job-1", "m-1", "p-1", 0),
-		mkEvent("job-1", "m-1", "p-2", 0),
+		mkEvent("11111111-1111-1111-1111-111111111111", "m-1", "p-1"),
+		mkEvent("11111111-1111-1111-1111-111111111111", "m-1", "p-2"),
 	})
 	if err != nil {
 		t.Fatalf("ProcessBatch: %v", err)
@@ -115,31 +110,50 @@ func TestProcessBatchAppliesAll(t *testing.T) {
 	}
 }
 
-func TestProcessBatchIsolatesPoisonEvent(t *testing.T) {
+func TestProcessBatchDeadLettersInvalidEvents(t *testing.T) {
 	t.Parallel()
 
-	writer := &fakeWriter{failFirst: 1} // one single-event write fails
+	writer := &fakeWriter{}
 	retrier := newFakeRetrier()
 	reporter := &fakeReporter{}
 	svc := NewService(writer, LinearRetryPolicy{}, retrier, reporter, ProcessingLimits{})
 
-	// The batch write succeeds as a whole (failAll false), so this tests
-	// the fast path; poison isolation is exercised via retry policy below.
-	err := svc.ProcessBatch(context.Background(), []Event{mkEvent("job-1", "m-1", "p-1", 0)})
+	// A non-uuid job id would fail the shared batch statement's cast and
+	// poison otherwise-valid rows; validation routes it to the DLQ before
+	// any database round trip.
+	err := svc.ProcessBatch(context.Background(), []Event{
+		mkEvent("not-a-uuid", "m-1", "p-bad"),
+		mkEvent("11111111-1111-1111-1111-111111111111", "m-1", "p-good"),
+	})
 	if err != nil {
 		t.Fatalf("ProcessBatch: %v", err)
 	}
-
-	// Direct adjudication path: a batch that fails wholesale falls back to
-	// per-event writes; the failing event is retried, not lost.
-	writer2 := &fakeWriter{failAll: true}
-	svc2 := NewService(writer2, LinearRetryPolicy{}, retrier, reporter, ProcessingLimits{})
-	err = svc2.ProcessBatch(context.Background(), []Event{mkEvent("job-2", "m-2", "p-9", 0)})
-	if err != nil {
-		t.Fatalf("ProcessBatch adjudicated: %v", err)
+	if len(writer.written) != 1 || writer.written[0].ProductID != "p-good" {
+		t.Fatalf("written = %+v, want only the valid product", writer.written)
 	}
-	if got := retrier.retries["m-2:p-9"]; got != 1 {
-		t.Fatalf("retry attempt = %d, want 1", got)
+	if len(retrier.deads) != 1 {
+		t.Fatalf("deads = %v, want the invalid event dead-lettered", retrier.deads)
+	}
+}
+
+func TestProcessBatchDefersWriteFailures(t *testing.T) {
+	t.Parallel()
+
+	writer := &fakeWriter{failAll: true}
+	retrier := newFakeRetrier()
+	reporter := &fakeReporter{}
+	svc := NewService(writer, LinearRetryPolicy{}, retrier, reporter, ProcessingLimits{})
+
+	// Environmental failures defer the whole batch: offsets stay
+	// uncommitted and the next poll retries; nothing is republished.
+	err := svc.ProcessBatch(context.Background(), []Event{
+		mkEvent("11111111-1111-1111-1111-111111111111", "m-1", "p-1"),
+	})
+	if err == nil {
+		t.Fatal("write failure must defer the batch")
+	}
+	if len(retrier.deads) != 0 || len(retrier.retries) != 0 {
+		t.Fatalf("environmental failure must not republish: %+v %+v", retrier.deads, retrier.retries)
 	}
 }
 
@@ -198,7 +212,7 @@ func TestBackoffDelays(t *testing.T) {
 	}
 }
 
-func TestFlushProgressResetsAccumulators(t *testing.T) {
+func TestFlushProgressIsIdempotentSnapshot(t *testing.T) {
 	t.Parallel()
 
 	writer := &fakeWriter{}
@@ -206,15 +220,45 @@ func TestFlushProgressResetsAccumulators(t *testing.T) {
 	reporter := &fakeReporter{}
 	svc := NewService(writer, LinearRetryPolicy{}, retrier, reporter, ProcessingLimits{})
 
-	_ = svc.ProcessBatch(context.Background(), []Event{mkEvent("job-1", "m-1", "p-1", 0)})
+	_ = svc.ProcessBatch(context.Background(), []Event{mkEvent("11111111-1111-1111-1111-111111111111", "m-1", "p-1")})
 	if err := svc.FlushProgress(context.Background()); err != nil {
 		t.Fatalf("first flush: %v", err)
 	}
-	// Second flush with no work must report nothing.
+	// Unchanged totals are not resent: the snapshot is idempotent.
 	if err := svc.FlushProgress(context.Background()); err != nil {
 		t.Fatalf("second flush: %v", err)
 	}
 	if len(reporter.reports) != 1 {
 		t.Fatalf("reports = %d, want 1", len(reporter.reports))
+	}
+
+	// New work raises the cumulative total and is reported.
+	_ = svc.ProcessBatch(context.Background(), []Event{mkEvent("11111111-1111-1111-1111-111111111111", "m-1", "p-2")})
+	if err := svc.FlushProgress(context.Background()); err != nil {
+		t.Fatalf("third flush: %v", err)
+	}
+	if len(reporter.reports) != 2 || reporter.reports[1].ProcessedRows != 2 {
+		t.Fatalf("reports = %+v, want cumulative 2", reporter.reports)
+	}
+}
+
+func TestFromEventValidation(t *testing.T) {
+	t.Parallel()
+
+	valid := mkEvent("11111111-1111-1111-1111-111111111111", "m-1", "p-1").ProductImported
+	if _, err := FromEvent(valid); err != nil {
+		t.Fatalf("valid event rejected: %v", err)
+	}
+
+	noMerchant := valid
+	noMerchant.Product.MerchantID = ""
+	if _, err := FromEvent(noMerchant); err == nil {
+		t.Fatal("missing merchant must be rejected")
+	}
+
+	badJob := valid
+	badJob.JobID = "not-a-uuid"
+	if _, err := FromEvent(badJob); err == nil {
+		t.Fatal("non-uuid job id must be rejected before the batch write")
 	}
 }

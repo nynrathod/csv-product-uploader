@@ -46,7 +46,7 @@ func TestProgressTrackerAppliesAndCommits(t *testing.T) {
 	store := newMemStore()
 	store.put(&ImportJob{ID: jobID, Status: StatusProcessing, PublishedRows: 5})
 
-	valid, err := json.Marshal(events.ImportProgress{JobID: jobID, ProcessedRows: 5})
+	valid, err := json.Marshal(events.ImportProgress{JobID: jobID, WorkerID: "w-1", ProcessedRows: 5})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -70,7 +70,7 @@ func TestProgressTrackerAppliesAndCommits(t *testing.T) {
 		close(done)
 	}()
 
-	waitForJob(t, store, jobID, func(j ImportJob) bool { return j.Status == StatusCompleted }, 5*time.Second)
+	waitForJob(t, store, jobID, func(j ImportJob) bool { return j.ProcessedRows == 5 }, 5*time.Second)
 
 	cancel()
 	select {
@@ -80,8 +80,8 @@ func TestProgressTrackerAppliesAndCommits(t *testing.T) {
 	}
 
 	j, _ := store.Get(context.Background(), jobID)
-	if j.ProcessedRows != 5 || j.Status != StatusCompleted {
-		t.Fatalf("job = %+v, want completed with 5 processed", j)
+	if j.ProcessedRows != 5 || j.Status != StatusProcessing {
+		t.Fatalf("job = %+v, want folded counters while awaiting confirmation", j)
 	}
 
 	// Every settled record, including the foreign and undecodable ones,

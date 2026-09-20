@@ -149,30 +149,37 @@ func rowsAffected(tag pgconn.CommandTag, id string) error {
 	return nil
 }
 
-// ApplyProgress folds a progress delta into a job's counters. The update
-// is restricted to jobs awaiting catalog confirmation, so replayed or
-// duplicate reports cannot inflate the ledger, and the completion
-// transition is evaluated atomically with the counter fold.
-func (s *JobStore) ApplyProgress(ctx context.Context, id string, processed, retried, dead int64) error {
-	var confirmed bool
-	err := s.pool.QueryRow(ctx, `
-        UPDATE import_jobs
-        SET processed_rows = processed_rows + $2,
-            retried_rows = retried_rows + $3,
-            dead_rows = dead_rows + $4,
-            updated_at = now(),
-            status = CASE
-                WHEN (processed_rows + $2) + (dead_rows + $4) >= published_rows
-                THEN 'completed'
-                ELSE status
-            END
-        WHERE id = $1::uuid AND status = 'processing'
-        RETURNING true`,
-		id, processed, retried, dead).Scan(&confirmed)
-	if errors.Is(err, pgx.ErrNoRows) {
-		// The job is unknown or no longer awaiting confirmation; either
-		// way the event is settled and its offset may commit.
-		return nil
+// ApplyProgress folds one catalog worker's cumulative snapshot into the
+// job's ledger in two steps: the worker's row upserts monotonically with
+// GREATEST, then the job's counters are recomputed as the sum across all
+// reporting workers. Two statements are required because a single
+// statement cannot observe its own data-modifying CTE. Each fold is
+// idempotent: duplicate or replayed snapshots converge, and a crash
+// between the steps is repaired by the next fold. Folding is accepted
+// for any non-terminal job; completion is derived by the importer once
+// publishing has ended.
+func (s *JobStore) ApplyProgress(ctx context.Context, id, workerID string, processed, retried, dead int64) error {
+	_, err := s.pool.Exec(ctx, `
+        INSERT INTO import_progress_workers (job_id, worker_id, processed_rows, retried_rows, dead_rows)
+        VALUES ($1::uuid, $2, $3, $4, $5)
+        ON CONFLICT (job_id, worker_id) DO UPDATE
+        SET processed_rows = GREATEST(import_progress_workers.processed_rows, EXCLUDED.processed_rows),
+            retried_rows  = GREATEST(import_progress_workers.retried_rows,  EXCLUDED.retried_rows),
+            dead_rows     = GREATEST(import_progress_workers.dead_rows,     EXCLUDED.dead_rows),
+            updated_at    = now()`,
+		id, workerID, processed, retried, dead)
+	if err != nil {
+		return err
 	}
+
+	_, err = s.pool.Exec(ctx, `
+        UPDATE import_jobs SET
+            processed_rows = (SELECT COALESCE(SUM(processed_rows), 0) FROM import_progress_workers WHERE job_id = $1::uuid),
+            retried_rows   = (SELECT COALESCE(SUM(retried_rows), 0) FROM import_progress_workers WHERE job_id = $1::uuid),
+            dead_rows      = (SELECT COALESCE(SUM(dead_rows), 0) FROM import_progress_workers WHERE job_id = $1::uuid),
+            updated_at     = now()
+        WHERE id = $1::uuid
+          AND status IN ('uploading', 'parsing', 'publishing', 'processing')`,
+		id)
 	return err
 }

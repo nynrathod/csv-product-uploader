@@ -23,15 +23,14 @@ type JobStore interface {
 	// UpdateStatus applies a lifecycle transition and optionally records
 	// the failure cause.
 	UpdateStatus(ctx context.Context, id string, to Status, lastErr *string) error
-	// FailStale marks every non-terminal job as failed; it runs at service
-	// startup so jobs orphaned by a restart or crash never hang forever.
+	// FailStale marks every job whose work died with the process as
+	// failed; it runs at service startup so orphaned jobs never hang.
 	FailStale(ctx context.Context, reason string) (int64, error)
-	// ApplyProgress folds a progress delta into a job's counters and
-	// completes the job once the catalog has confirmed every published
-	// event as processed or dead-lettered. Progress for jobs that are not
-	// awaiting confirmation is ignored, so replayed or duplicate reports
-	// cannot inflate the ledger.
-	ApplyProgress(ctx context.Context, id string, processed, retried, dead int64) error
+	// ApplyProgress folds one catalog worker's cumulative snapshot into
+	// the job's ledger. Each worker's snapshot folds monotonically and
+	// the job totals derive from the sum across workers; duplicate or
+	// replayed reports converge instead of double-counting.
+	ApplyProgress(ctx context.Context, id, workerID string, processed, retried, dead int64) error
 }
 
 // EventPublisher emits product events onto the durable event stream that
@@ -41,8 +40,7 @@ type EventPublisher interface {
 	// be safe for concurrent use.
 	PublishProductImported(ctx context.Context, evt events.ProductImported) error
 	// Flush waits until everything published so far is durably delivered
-	// and reports the first delivery failure, if any. Only a nil Flush
-	// makes the previously published rows durable.
+	// and reports the first delivery failure, if any.
 	Flush(ctx context.Context) error
 	// Close flushes and releases the underlying producer.
 	Close()

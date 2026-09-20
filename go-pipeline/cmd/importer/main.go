@@ -86,7 +86,10 @@ func main() {
 	go func() {
 		defer close(trackerDone)
 		if err := tracker.Run(ctx); err != nil {
-			log.Printf("progress tracker exited: %v", err)
+			// Without the tracker, imports can never observe catalog
+			// confirmation; failing fast surfaces the fault instead of
+			// silently freezing jobs.
+			log.Fatalf("progress tracker exited: %v", err)
 		}
 	}()
 

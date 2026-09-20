@@ -35,28 +35,53 @@ func NewWorker(source RecordSource, service *Service, cfg WorkerConfig) *Worker 
 }
 
 // Run consumes until the context is cancelled. Each cycle polls records,
-// processes them, commits offsets, then flushes progress: progress events
-// always trail durable processing, never lead it. Undecodable records are
-// dead-lettered so their offsets still commit; a poison payload can never
-// wedge the pipeline.
+// processes them, publishes progress, then commits offsets: progress is
+// always published before the offsets it covers are committed, so a
+// worker death can never strand counts between applied and reported. If
+// the worker dies between publishing progress and committing, the
+// successor re-consumes and re-counts at most one batch; the catalog's
+// own row count remains the ground truth.
 func (w *Worker) Run(ctx context.Context) error {
-	ticker := time.NewTicker(w.cfg.ProgressFlushInterval)
-	defer ticker.Stop()
-
-	for {
-		if err := ctx.Err(); err != nil {
-			return w.drain()
+	// Every exit path flushes outstanding progress so the last counts of
+	// a drain are never lost to a shutdown or an error return.
+	defer func() {
+		if err := w.drain(); err != nil {
+			log.Printf("flushing progress on exit: %v", err)
 		}
+	}()
 
-		recs := w.source.Poll(ctx)
-		if len(recs) == 0 {
+	// The flusher owns idle-period cadence on its own goroutine: it never
+	// depends on the main loop cycling, so a drain's final totals are
+	// always published. FlushProgress synchronizes on the service's
+	// mutex, making concurrent flushes with the main loop safe.
+	flushDone := make(chan struct{})
+	go func() {
+		defer close(flushDone)
+		ticker := time.NewTicker(w.cfg.ProgressFlushInterval)
+		defer ticker.Stop()
+		for {
 			select {
 			case <-ctx.Done():
-				return w.drain()
+				return
 			case <-ticker.C:
 				if err := w.service.FlushProgress(ctx); err != nil {
 					log.Printf("flushing progress: %v", err)
 				}
+			}
+		}
+	}()
+
+	for {
+		if err := ctx.Err(); err != nil {
+			<-flushDone
+			return nil
+		}
+
+		recs := w.source.Poll(ctx)
+		if len(recs) == 0 {
+			if ctx.Err() != nil {
+				<-flushDone
+				return nil
 			}
 			continue
 		}
@@ -75,24 +100,27 @@ func (w *Worker) Run(ctx context.Context) error {
 
 		for _, rec := range poison {
 			if err := w.service.ProcessPoison(ctx, rec); err != nil {
-				// Dead-lettering failed: do not commit; reprocessing the
-				// record re-attempts the dead letter, which is idempotent
-				// in effect (the DLQ holds a copy either way).
 				log.Printf("dead-lettering record %s/%d@%d failed: %v",
 					rec.Topic, rec.Partition, rec.Offset, err)
-				// Drop the record from this cycle's commit set by
-				// aborting the whole cycle: retry everything.
 				return fmt.Errorf("dead-lettering poison record: %w", err)
 			}
 		}
 
 		if len(evts) > 0 {
 			if err := w.service.ProcessBatch(ctx, evts); err != nil {
-				// Unadjudicated failure: offsets stay uncommitted and the
-				// next poll reprocesses the batch; upserts are idempotent.
-				log.Printf("processing batch: %v", err)
-				continue
+				// The batch could not be adjudicated after in-place
+				// retries. Offsets stay uncommitted and the worker stops:
+				// a restart re-fetches from the last committed offset,
+				// which preserves at-least-once delivery.
+				return fmt.Errorf("processing batch: %w", err)
 			}
+		}
+
+		// Progress before commit: the reported totals must cover
+		// everything this commit covers. One small event per batch keeps
+		// this cheap even at large batch sizes.
+		if err := w.service.FlushProgress(ctx); err != nil {
+			return fmt.Errorf("flushing progress before commit: %w", err)
 		}
 
 		if err := w.source.CommitRecords(ctx, recs...); err != nil {
@@ -101,8 +129,8 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 }
 
-// drain flushes outstanding progress on shutdown so the last counts are
-// never lost to a restart.
+// drain flushes outstanding progress so the last counts of a drain are
+// never lost to a shutdown.
 func (w *Worker) drain() error {
 	if err := w.service.FlushProgress(context.Background()); err != nil {
 		return fmt.Errorf("flushing progress during shutdown: %w", err)

@@ -93,7 +93,7 @@ func (t *ProgressTracker) apply(ctx context.Context, rec *kgo.Record) bool {
 		return true
 	}
 
-	if err := t.store.ApplyProgress(ctx, evt.JobID, evt.ProcessedRows, evt.RetriedRows, evt.DeadRows); err != nil {
+	if err := t.store.ApplyProgress(ctx, evt.JobID, evt.WorkerID, evt.ProcessedRows, evt.RetriedRows, evt.DeadRows); err != nil {
 		if errors.Is(err, ErrNotFound) {
 			log.Printf("progress tracker: no import job %s (event consumed)", evt.JobID)
 			return true

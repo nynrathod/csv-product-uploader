@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -15,11 +16,17 @@ import (
 
 // memStore is an in-memory JobStore for tests.
 type memStore struct {
-	mu   sync.Mutex
-	jobs map[string]*ImportJob
+	mu             sync.Mutex
+	jobs           map[string]*ImportJob
+	workerProgress map[string][3]int64
 }
 
-func newMemStore() *memStore { return &memStore{jobs: map[string]*ImportJob{}} }
+func newMemStore() *memStore {
+	return &memStore{
+		jobs:           map[string]*ImportJob{},
+		workerProgress: map[string][3]int64{},
+	}
+}
 
 func (m *memStore) put(j *ImportJob) {
 	m.mu.Lock()
@@ -133,22 +140,52 @@ func waitForJob(t *testing.T, store *memStore, id string, cond func(ImportJob) b
 	return ImportJob{}
 }
 
-func (m *memStore) ApplyProgress(_ context.Context, id string, processed, retried, dead int64) error {
+// waitForFileGone waits until the service's deferred cleanup removes the
+// spooled upload file.
+func waitForFileGone(t *testing.T, path string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("spooled file %s was not removed within %v", path, timeout)
+}
+
+// ApplyProgress folds a worker's cumulative snapshot monotonically and
+// derives the job totals as the sum across workers, mirroring the SQL
+// semantics.
+func (m *memStore) ApplyProgress(_ context.Context, id, workerID string, processed, retried, dead int64) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	j, ok := m.jobs[id]
-	if !ok || j.Status != StatusProcessing {
-		// Unknown jobs and jobs no longer awaiting confirmation ignore
-		// progress: replayed or duplicate reports cannot inflate the
-		// ledger.
+	if !ok || j.Status.Terminal() {
 		return nil
 	}
-	j.ProcessedRows += processed
-	j.RetriedRows += retried
-	j.DeadRows += dead
-	if j.ProcessedRows+j.DeadRows >= j.PublishedRows {
-		j.Status = StatusCompleted
+	key := id + "|" + workerID
+	cur := m.workerProgress[key]
+	if processed > cur[0] {
+		cur[0] = processed
 	}
+	if retried > cur[1] {
+		cur[1] = retried
+	}
+	if dead > cur[2] {
+		cur[2] = dead
+	}
+	m.workerProgress[key] = cur
+
+	var sum [3]int64
+	for k, v := range m.workerProgress {
+		if strings.HasPrefix(k, id+"|") {
+			sum[0] += v[0]
+			sum[1] += v[1]
+			sum[2] += v[2]
+		}
+	}
+	j.ProcessedRows, j.RetriedRows, j.DeadRows = sum[0], sum[1], sum[2]
 	j.UpdatedAt = time.Now().UTC()
 	return nil
 }
@@ -189,17 +226,18 @@ func TestImportServiceEndsAwaitingCatalogConfirmation(t *testing.T) {
 	}
 
 	// Confirming every event through progress completes the job.
-	if err := store.ApplyProgress(context.Background(), job.ID, 3, 0, 0); err != nil {
+	if err := store.ApplyProgress(context.Background(), job.ID, "w-1", 3, 0, 0); err != nil {
 		t.Fatalf("ApplyProgress: %v", err)
 	}
-	done, _ := store.Get(context.Background(), job.ID)
-	if done.Status != StatusCompleted || done.ProcessedRows != 3 {
+	done := waitForJob(t, store, job.ID, func(j ImportJob) bool { return j.Status == StatusCompleted }, 5*time.Second)
+	if done.ProcessedRows != 3 {
 		t.Fatalf("job = %+v, want completed with 3 processed", done)
 	}
 
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatalf("temp file still present: %v", err)
-	}
+	// The service removes the spooled file when processing ends; the
+	// removal races the final status write, so wait for it briefly
+	// instead of asserting it instantly.
+	waitForFileGone(t, path, 5*time.Second)
 }
 
 func TestImportServiceCompletesWhenNothingPublished(t *testing.T) {
@@ -379,6 +417,11 @@ func TestImportServicePublishesValidRows(t *testing.T) {
 	final := waitForJob(t, store, job.ID, func(j ImportJob) bool {
 		return j.Status == StatusProcessing && j.PublishedRows == 2
 	}, 5*time.Second)
+	if err := store.ApplyProgress(context.Background(), job.ID, "w-1", 2, 0, 0); err != nil {
+		t.Fatalf("ApplyProgress: %v", err)
+	}
+	waitForJob(t, store, job.ID, func(j ImportJob) bool { return j.Status == StatusCompleted }, 5*time.Second)
+
 	if final.Status != StatusProcessing {
 		t.Fatalf("status = %s, lastError = %v", final.Status, final.LastError)
 	}
@@ -413,34 +456,47 @@ func TestApplyProgressSemantics(t *testing.T) {
 	store := newMemStore()
 	store.put(&ImportJob{ID: "j-ap", Status: StatusProcessing, PublishedRows: 10})
 
-	if err := store.ApplyProgress(context.Background(), "j-ap", 4, 1, 1); err != nil {
+	// Two workers report their own cumulative snapshots; the job totals
+	// are the sum across workers.
+	if err := store.ApplyProgress(context.Background(), "j-ap", "w-1", 4, 0, 0); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if err := store.ApplyProgress(context.Background(), "j-ap", "w-2", 5, 0, 0); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
 	j, _ := store.Get(context.Background(), "j-ap")
-	if j.Status != StatusProcessing || j.ProcessedRows != 4 || j.RetriedRows != 1 || j.DeadRows != 1 {
-		t.Fatalf("job = %+v", j)
+	if j.Status != StatusProcessing || j.ProcessedRows != 9 {
+		t.Fatalf("job = %+v, want processing with 9 processed", j)
 	}
 
-	// Confirming the remainder completes the job atomically with the fold.
-	if err := store.ApplyProgress(context.Background(), "j-ap", 5, 0, 0); err != nil {
+	// A replayed older snapshot from one worker cannot lower or inflate
+	// the totals.
+	if err := store.ApplyProgress(context.Background(), "j-ap", "w-1", 4, 0, 0); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
 	j, _ = store.Get(context.Background(), "j-ap")
-	if j.Status != StatusCompleted {
-		t.Fatalf("status = %s, want completed", j.Status)
+	if j.ProcessedRows != 9 {
+		t.Fatalf("processed = %d, want unchanged 9", j.ProcessedRows)
 	}
 
-	// Late or replayed progress cannot inflate a confirmed ledger.
-	if err := store.ApplyProgress(context.Background(), "j-ap", 5, 0, 0); err != nil {
+	// Folding is accepted while the import is still streaming.
+	store.put(&ImportJob{ID: "j-stream", Status: StatusParsing})
+	if err := store.ApplyProgress(context.Background(), "j-stream", "w-1", 2, 0, 0); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
-	j, _ = store.Get(context.Background(), "j-ap")
-	if j.ProcessedRows != 9 || j.Status != StatusCompleted {
-		t.Fatalf("job = %+v, want counters unchanged", j)
+
+	// Terminal jobs ignore progress.
+	store.put(&ImportJob{ID: "j-done", Status: StatusCompleted, ProcessedRows: 8})
+	if err := store.ApplyProgress(context.Background(), "j-done", "w-1", 5, 0, 0); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	done, _ := store.Get(context.Background(), "j-done")
+	if done.ProcessedRows != 8 {
+		t.Fatalf("completed job processed = %d, want unchanged 8", done.ProcessedRows)
 	}
 
 	// Unknown jobs settle the event without error.
-	if err := store.ApplyProgress(context.Background(), "missing", 1, 0, 0); err != nil {
+	if err := store.ApplyProgress(context.Background(), "missing", "w-1", 1, 0, 0); err != nil {
 		t.Fatalf("apply for unknown job: %v", err)
 	}
 }

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/nynrathod/csv-product-uploader/go-pipeline/internal/catalog"
@@ -20,38 +19,51 @@ func NewProductWriter(pool *pgxpool.Pool) *ProductWriter {
 	return &ProductWriter{pool: pool}
 }
 
-// UpsertBatch applies every product in one transaction. The upsert is
-// idempotent on the (merchant_id, product_id) natural key: re-applying the
-// same product updates the same row instead of duplicating it, which is
-// what makes at-least-once delivery safe.
+// UpsertBatch applies every product as one unnest-driven upsert: the whole
+// batch is a single statement and a single network round trip, which keeps
+// catalog drain rate limited by the database, not by statement chatter.
+// The upsert is idempotent on the (merchant_id, product_id) natural key:
+// re-applying the same product updates the same row instead of duplicating
+// it, which is what makes at-least-once delivery safe.
 func (w *ProductWriter) UpsertBatch(ctx context.Context, products []catalog.Product) error {
 	if len(products) == 0 {
 		return nil
 	}
 
-	tx, err := w.pool.Begin(ctx)
+	merchants := make([]string, len(products))
+	productIDs := make([]string, len(products))
+	names := make([]string, len(products))
+	prices := make([]int64, len(products))
+	currencies := make([]string, len(products))
+	expirations := make([]string, len(products))
+	jobIDs := make([]string, len(products))
+	for i, p := range products {
+		merchants[i] = p.MerchantID
+		productIDs[i] = p.ProductID
+		names[i] = p.Name
+		prices[i] = p.PriceCents
+		currencies[i] = p.Currency
+		expirations[i] = p.ExpirationDate
+		jobIDs[i] = p.SourceJobID
+	}
+
+	// A single statement is atomic on its own; no explicit transaction is
+	// needed. NULLIF maps the empty string to a missing expiration.
+	_, err := w.pool.Exec(ctx, `
+        INSERT INTO products (merchant_id, product_id, name, price_cents, currency, expiration_date, source_job_id)
+        SELECT m, p, n, pr, c, NULLIF(e, '')::date, j::uuid
+        FROM unnest($1::text[], $2::text[], $3::text[], $4::bigint[], $5::text[], $6::text[], $7::text[])
+            AS t(m, p, n, pr, c, e, j)
+        ON CONFLICT (merchant_id, product_id) DO UPDATE
+        SET name = EXCLUDED.name,
+            price_cents = EXCLUDED.price_cents,
+            currency = EXCLUDED.currency,
+            expiration_date = EXCLUDED.expiration_date,
+            source_job_id = EXCLUDED.source_job_id,
+            updated_at = now()`,
+		merchants, productIDs, names, prices, currencies, expirations, jobIDs)
 	if err != nil {
-		return fmt.Errorf("beginning catalog transaction: %w", err)
-	}
-	defer tx.Rollback(ctx)
-
-	batch := &pgx.Batch{}
-	for _, p := range products {
-		batch.Queue(`
-            INSERT INTO products (merchant_id, product_id, name, price_cents, currency, expiration_date, source_job_id)
-            VALUES ($1, $2, $3, $4, $5, NULLIF($6, '')::date, $7)
-            ON CONFLICT (merchant_id, product_id) DO UPDATE
-            SET name = EXCLUDED.name,
-                price_cents = EXCLUDED.price_cents,
-                currency = EXCLUDED.currency,
-                expiration_date = EXCLUDED.expiration_date,
-                source_job_id = EXCLUDED.source_job_id,
-                updated_at = now()`,
-			p.MerchantID, p.ProductID, p.Name, p.PriceCents, p.Currency, p.ExpirationDate, p.SourceJobID)
-	}
-
-	if err := tx.SendBatch(ctx, batch).Close(); err != nil {
 		return fmt.Errorf("applying catalog batch: %w", err)
 	}
-	return tx.Commit(ctx)
+	return nil
 }

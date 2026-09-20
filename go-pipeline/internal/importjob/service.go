@@ -2,6 +2,7 @@ package importjob
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -121,17 +122,69 @@ func (s *ImportService) process(jobID, filePath string, opts StreamOptions) {
 		return
 	}
 
-	// A job with nothing to materialize is complete the moment publishing
-	// ends. Otherwise the import awaits the catalog worker's confirmation
-	// through progress events; the progress tracker advances the job to
-	// completed once every published event is confirmed as processed or
-	// dead-lettered.
-	terminal := StatusCompleted
-	if published > 0 {
-		terminal = StatusProcessing
+	// An import with nothing to materialize is complete the moment
+	// publishing ends. Otherwise the importer awaits the catalog worker's
+	// confirmation: the progress tracker folds the worker's reports into
+	// this job, and the await loop below derives completion from the
+	// folded counters. Evaluating completion here, against the final
+	// published count, cannot race intermediate progress writes.
+	if published == 0 {
+		if err := s.store.UpdateStatus(ctx, jobID, StatusCompleted, nil); err != nil {
+			log.Printf("import %s: marking completed failed: %v", jobID, err)
+		}
+		return
 	}
-	if err := s.store.UpdateStatus(ctx, jobID, terminal, nil); err != nil {
-		log.Printf("import %s: marking %s failed: %v", jobID, terminal, err)
+	if err := s.store.UpdateStatus(ctx, jobID, StatusProcessing, nil); err != nil {
+		s.fail(ctx, jobID, err)
+		return
+	}
+	s.awaitConfirmation(ctx, jobID)
+
+}
+
+// confirmationPollInterval is how often the importer re-evaluates catalog
+// confirmation while a job awaits it.
+const confirmationPollInterval = 250 * time.Millisecond
+
+// confirmationTimeout bounds how long a job may sit without any progress
+// activity before the import is failed as unconfirmed.
+const confirmationTimeout = 10 * time.Minute
+
+// awaitConfirmation polls the job's folded counters until the catalog has
+// confirmed every published event as processed or dead-lettered, the
+// confirmation budget expires, or a terminal decision lands elsewhere.
+// Completion is derived by the importer, the owner of the job record,
+// from the catalog worker's reported progress.
+func (s *ImportService) awaitConfirmation(ctx context.Context, jobID string) {
+	ticker := time.NewTicker(confirmationPollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			s.fail(ctx, jobID, fmt.Errorf("waiting for catalog confirmation: %w", ctx.Err()))
+			return
+		case <-ticker.C:
+		}
+
+		job, err := s.store.Get(ctx, jobID)
+		if err != nil {
+			log.Printf("import %s: reading confirmation state failed: %v", jobID, err)
+			continue
+		}
+		if job.Status != StatusProcessing {
+			return
+		}
+		if job.ProcessedRows+job.DeadRows >= job.PublishedRows {
+			if err := s.store.UpdateStatus(ctx, jobID, StatusCompleted, nil); err != nil {
+				log.Printf("import %s: marking completed failed: %v", jobID, err)
+			}
+			return
+		}
+		if time.Since(job.UpdatedAt) > confirmationTimeout {
+			s.fail(ctx, jobID, errors.New("timed out waiting for catalog confirmation"))
+			return
+		}
 	}
 }
 

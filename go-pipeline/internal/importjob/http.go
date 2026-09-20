@@ -430,13 +430,16 @@ func (h *HTTPHandler) getReport(c fiber.Ctx) error {
 func buildReport(j ImportJob) reportResponse {
 	confirmed := j.ProcessedRows + j.DeadRows
 	unconfirmed := j.PublishedRows - confirmed
+	if unconfirmed < 0 {
+		// At-least-once progress can over-report by at most one batch
+		// across a worker crash; the catalog count is the ground truth.
+		unconfirmed = 0
+	}
 
 	state := "in-flight"
 	switch {
 	case j.Status == StatusFailed:
 		state = "failed"
-	case unconfirmed < 0:
-		state = "discrepancy"
 	case j.Status == StatusCompleted:
 		if unconfirmed == 0 {
 			state = "complete"

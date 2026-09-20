@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -41,10 +42,18 @@ func main() {
 		log.Fatalf("ensuring kafka topics: %v", err)
 	}
 
+	// The worker identity scopes its progress snapshots: the importer
+	// folds each worker's counters independently and derives job totals
+	// as the sum, which is correct under partitioned consumption.
+	host, _ := os.Hostname()
+	workerID := fmt.Sprintf("%s-%d", host, os.Getpid())
+
 	consumer, err := kafka.NewConsumer(kafka.ConsumerConfig{
-		Brokers:  cfg.KafkaBrokers,
-		Group:    kafka.GroupCatalogWriter,
-		ClientID: "catalog-worker",
+		Brokers:        cfg.KafkaBrokers,
+		Group:          kafka.GroupCatalogWriter,
+		ClientID:       "catalog-worker",
+		MaxPollRecords: cfg.WorkerMaxPollRecords,
+		MaxWait:        time.Duration(cfg.WorkerFetchMaxWaitMillis) * time.Millisecond,
 	}, kafka.TopicProductImported, kafka.TopicProductRetry)
 	if err != nil {
 		log.Fatalf("creating the event consumer: %v", err)
@@ -65,7 +74,7 @@ func main() {
 		Brokers:         cfg.KafkaBrokers,
 		ClientID:        "catalog-worker-progress",
 		DeliveryTimeout: 30 * time.Second,
-	})
+	}, workerID)
 	if err != nil {
 		log.Fatalf("creating the progress reporter: %v", err)
 	}
@@ -84,8 +93,8 @@ func main() {
 		ProgressFlushInterval: 2 * time.Second,
 	})
 
-	log.Printf("catalog-worker consuming %s and %s (group %s)",
-		kafka.TopicProductImported, kafka.TopicProductRetry, kafka.GroupCatalogWriter)
+	log.Printf("catalog-worker %s consuming %s and %s (group %s)",
+		workerID, kafka.TopicProductImported, kafka.TopicProductRetry, kafka.GroupCatalogWriter)
 
 	if err := worker.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		log.Fatalf("catalog-worker exited: %v", err)
