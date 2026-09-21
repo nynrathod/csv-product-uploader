@@ -78,7 +78,7 @@ Kafka UI: http://localhost:8081
 
 ## Benchmarks
 
-Measured end-to-end through the public HTTP API on a Windows laptop (24-core i7, Docker Desktop: Kafka + PostgreSQL in WSL2). Zero-loss is verified independently: published events = processed events = catalog row count. Run-to-run variance is roughly ±10%; reproduce with `go run ./benchmark/run`.
+Measured end-to-end through the public HTTP  (Docker Desktop: Kafka + PostgreSQL). Zero-loss is verified independently: published events = processed events = catalog row count. Run-to-run variance is roughly ±10%; reproduce with `go run ./benchmark/run`.
 
 | Rows | Workers | End-to-end | Sustained | Peak drain | p50 | p95 | p99 | Peak RSS |
 |---:|---:|---:|---:|---:|---:|---:|---:|---:|
