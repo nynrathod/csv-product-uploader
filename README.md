@@ -4,7 +4,7 @@ Distributed, event-driven product-import platform. CSV uploads are streamed with
 
 ```text
                     ┌─────────────────────────┐
-CSV upload ─HTTP──▶ │ importer (Fiber v3)     │ owns import_db
+CSV upload ─HTTP──▶ │ importer (Golang)     │ owns import_db
                     │ stream · validate       │
                     │ publish · track         │
                     └───────────┬─────────────┘
