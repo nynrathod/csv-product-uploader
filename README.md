@@ -1,4 +1,4 @@
-# CatalogStream 
+# CatalogStream - go-pipeline
 
 Distributed, event-driven product-import platform. CSV uploads are streamed with bounded memory, validated, and published to Kafka as durable events; an independent worker materializes them into PostgreSQL with idempotent upserts. Two services, two databases, one event log.
 
